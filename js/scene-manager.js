@@ -1,0 +1,130 @@
+/**
+ * Scene Manager — Three.js scene setup, lighting, camera, orbit controls,
+ * resize handling, and background.
+ */
+
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+export class SceneManager {
+
+  /**
+   * @param {HTMLElement} container - DOM element for the renderer.
+   * @param {object} options - { backgroundColor, antialias }
+   */
+  constructor(container, options = {}) {
+    this.container = container;
+
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: options.antialias !== false,
+      preserveDrawingBuffer: true,
+      logarithmicDepthBuffer: true,
+    });
+    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.setSize(container.clientWidth, container.clientHeight);
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.2;
+    container.appendChild(this.renderer.domElement);
+
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(options.backgroundColor || 0xe8ecf0);
+
+    this.camera = new THREE.PerspectiveCamera(
+      45,
+      container.clientWidth / container.clientHeight,
+      10,
+      500000
+    );
+    this.camera.position.set(2000, 1500, 2500);
+    this.camera.lookAt(0, 500, 0);
+
+    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.08;
+    this.controls.target.set(0, 500, 0);
+    this.controls.update();
+
+    this._setupLights();
+
+    this._onResize = this._handleResize.bind(this);
+    window.addEventListener('resize', this._onResize);
+
+    this._animate = this._animate.bind(this);
+    this._animFrame = requestAnimationFrame(this._animate);
+  }
+
+  _setupLights() {
+    const ambient = new THREE.AmbientLight(0x606060, 3);
+    this.scene.add(ambient);
+
+    const key = new THREE.DirectionalLight(0xffffff, 4);
+    key.position.set(3000, 4000, 2000);
+    this.scene.add(key);
+
+    const fill = new THREE.DirectionalLight(0x8090c0, 1.5);
+    fill.position.set(-2000, 1000, -2000);
+    this.scene.add(fill);
+
+    const hemi = new THREE.HemisphereLight(0x606080, 0x303040, 1.5);
+    this.scene.add(hemi);
+  }
+
+  _handleResize() {
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(w, h);
+  }
+
+  _animate() {
+    this._animFrame = requestAnimationFrame(this._animate);
+    this.controls.update();
+    this.renderer.render(this.scene, this.camera);
+  }
+
+  resetCamera() {
+    this.camera.position.set(2000, 1500, 2500);
+    this.controls.target.set(0, 500, 0);
+    this.controls.update();
+  }
+
+  focusOn(center, size = 500) {
+    this.controls.target.copy(center);
+    const offset = new THREE.Vector3(size, size * 0.7, size);
+    this.camera.position.copy(center).add(offset);
+    this.controls.update();
+  }
+
+  getSceneCenter() {
+    const box = new THREE.Box3();
+    this.scene.traverse((child) => {
+      if (child.isMesh) {
+        box.expandByObject(child);
+      }
+    });
+    if (box.isEmpty()) return new THREE.Vector3(0, 0, 0);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    return center;
+  }
+
+  getSceneBBox() {
+    const box = new THREE.Box3();
+    this.scene.traverse((child) => {
+      if (child.isMesh) {
+        box.expandByObject(child);
+      }
+    });
+    return box;
+  }
+
+  dispose() {
+    cancelAnimationFrame(this._animFrame);
+    window.removeEventListener('resize', this._onResize);
+    this.controls.dispose();
+    this.renderer.dispose();
+    this.container.removeChild(this.renderer.domElement);
+  }
+}
