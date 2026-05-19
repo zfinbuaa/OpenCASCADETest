@@ -2,7 +2,11 @@
 XCAF document utilities - assembly tree extraction and traversal.
 
 Extracts the full assembly tree from an OCCT XCAF document, including
-part names, colors, positions, and hierarchical relationships.
+part names, colors, positions, hierarchical relationships, and
+sub-assembly structure.
+
+Supports multi-level AP214 assemblies with NEXT_ASSEMBLY_USAGE_OCCURRENCE,
+PRODUCT_DEFINITION, and TRANSFORMATION data.
 """
 
 import numpy as np
@@ -12,6 +16,8 @@ from OCC.Core.XCAFDoc import (
 )
 from OCC.Core.TDF import TDF_LabelSequence
 from OCC.Core.TDataStd import TDataStd_Name
+from OCC.Core.GProp import GProp_GProps
+from OCC.Core.BRepGProp import brepgprop
 
 try:
     from OCC.Core.XCAFDoc import XCAFDoc_ColorSurf
@@ -71,6 +77,22 @@ def loc_to_matrix(loc):
     return mat.T.flatten().tolist()
 
 
+def _compute_shape_centroid(shape):
+    """Compute centroid of a TopoDS_Shape."""
+    try:
+        props = GProp_GProps()
+        brepgprop.VolumeProperties(shape, props)
+        if props.Mass() > 1e-12:
+            c = props.CentreOfMass()
+            return np.array([c.X(), c.Y(), c.Z()])
+        props2 = GProp_GProps()
+        brepgprop.SurfaceProperties(shape, props2)
+        c = props2.CentreOfMass()
+        return np.array([c.X(), c.Y(), c.Z()])
+    except Exception:
+        return None
+
+
 def extract_assembly_tree(doc):
     """
     Extract the full assembly tree from an XCAF document.
@@ -78,10 +100,14 @@ def extract_assembly_tree(doc):
     Each node contains:
         - label: OCAF TDF_Label
         - name: part name string
-        - shape: TopoDS_Shape (None for assembly-only nodes)
+        - shape: TopoDS_Shape (leaf nodes only, None for assembly-only nodes)
         - children: list of child nodes
         - color: [r, g, b] or None
         - transform: 4x4 column-major matrix list[16] or None
+        - is_leaf: bool (True for leaf parts with no children)
+        - child_names: list[str] (direct child names)
+        - ancestor_path: list[str] (full path from root)
+        - depth: int
 
     Returns:
         list[dict]: List of root assembly nodes.
@@ -89,30 +115,43 @@ def extract_assembly_tree(doc):
     shape_tool = XCAFDoc_DocumentTool.ShapeTool(doc.Main())
     color_tool = XCAFDoc_DocumentTool.ColorTool(doc.Main())
 
-    def traverse(label, parent_loc=None, depth=0):
+    def traverse(label, parent_loc=None, depth=0, ancestor_path=None):
+        if ancestor_path is None:
+            ancestor_path = []
+
+        name = get_shape_name(label, shape_tool)
+        current_path = ancestor_path + [name]
+
+        has_children = shape_tool.IsAssembly(label)
+        is_leaf = not has_children
+
         node = {
             "label": label,
-            "name": get_shape_name(label, shape_tool),
-            "shape": shape_tool.GetShape(label) if shape_tool.IsFree(label) else None,
+            "name": name,
+            "shape": shape_tool.GetShape(label) if is_leaf else None,
             "children": [],
             "color": None,
             "transform": None,
             "depth": depth,
+            "is_leaf": is_leaf,
+            "child_names": [],
+            "ancestor_path": current_path,
         }
 
         if color_tool.IsSet(label, XCAFDoc_ColorSurf):
             c = color_tool.GetColor(label, XCAFDoc_ColorSurf)
             node["color"] = [c.Red(), c.Green(), c.Blue()]
 
-        if shape_tool.IsAssembly(label):
+        if has_children:
             child_seq = TDF_LabelSequence()
             shape_tool.GetComponents(label, child_seq)
             for i in range(child_seq.Length()):
                 child_label = child_seq.Value(i + 1)
                 child_loc = shape_tool.GetLocation(child_label)
-                child = traverse(child_label, child_loc, depth + 1)
+                child = traverse(child_label, child_loc, depth + 1, current_path)
                 child["transform"] = loc_to_matrix(child_loc)
                 node["children"].append(child)
+                node["child_names"].append(child["name"])
 
         return node
 
@@ -128,37 +167,73 @@ def extract_assembly_tree(doc):
 
 def flatten_assembly_tree(roots):
     """
-    Flatten an assembly tree into a linear list of leaf parts.
+    Flatten an assembly tree into leaf parts and sub-assembly nodes.
 
-    Only leaf nodes with a shape and no children are included.
-    Compound/assembly nodes with children are skipped (their shape
-    already contains the sum of children geometry).
+    Leaf parts retain their direct parent (nearest sub-assembly) and
+    full ancestor path. Sub-assembly nodes are returned separately
+    with their child names and centroids.
 
     Returns:
-        list[dict]: Flat list of leaf part dictionaries.
+        tuple: (leaf_parts, sub_assemblies)
+            leaf_parts: list[dict] with keys:
+                name, shape, color, transform, parent, ancestors
+            sub_assemblies: list[dict] with keys:
+                name, child_names, depth, centroid, ancestor_path
     """
-    parts = []
+    leaf_parts = []
+    sub_assemblies = []
 
-    def traverse(node, parent_name=None):
-        has_children = len(node.get("children", [])) > 0
+    def traverse(node, parent_name=None, ancestor_path=None):
+        if ancestor_path is None:
+            ancestor_path = []
 
-        if node.get("shape") is not None and not has_children:
+        name = node["name"]
+        current_path = ancestor_path + [name]
+
+        if node.get("is_leaf", False):
+            direct_parent = parent_name if parent_name else name
             part = {
-                "name": node["name"],
-                "shape": node["shape"],
+                "name": name,
+                "shape": node.get("shape"),
                 "color": node.get("color"),
                 "transform": node.get("transform"),
-                "parent": parent_name,
+                "parent": direct_parent,
+                "ancestors": current_path,
             }
-            parts.append(part)
+            leaf_parts.append(part)
+        else:
+            centroid = None
+            if node.get("shape") is not None:
+                centroid = _compute_shape_centroid(node["shape"])
+
+            sa = {
+                "name": name,
+                "child_names": node.get("child_names", []),
+                "depth": node.get("depth", 0),
+                "centroid": centroid,
+                "ancestor_path": current_path,
+            }
+            sub_assemblies.append(sa)
 
         for child in node.get("children", []):
-            traverse(child, node["name"])
+            if node.get("is_leaf", False):
+                traverse(child, name, current_path)
+            else:
+                traverse(child, name, current_path)
 
     for root in roots:
         traverse(root)
 
-    return parts
+    if leaf_parts and not sub_assemblies:
+        sub_assemblies.append({
+            "name": leaf_parts[0].get("parent", "root"),
+            "child_names": [p["name"] for p in leaf_parts],
+            "depth": 0,
+            "centroid": None,
+            "ancestor_path": [leaf_parts[0].get("parent", "root")],
+        })
+
+    return leaf_parts, sub_assemblies
 
 
 def get_tree_stats(roots):

@@ -1,11 +1,11 @@
 """
 Assembly contact detection - finds face-to-face contacts between parts.
 
-Uses AABB spatial pre-filtering with R-tree indexing before expensive
-BRep distance computation. Includes contact area estimation for
-engineering-aware direction calculation.
+Uses AABB spatial pre-filtering before expensive BRep distance computation.
+Includes contact area estimation for engineering-aware direction calculation.
 """
 
+import sys
 import numpy as np
 from OCC.Core.BRepExtrema import BRepExtrema_DistShapeShape
 from OCC.Core.Bnd import Bnd_Box
@@ -32,6 +32,31 @@ def _aabbs_overlap(a, b):
         a[2] - AABB_PADDING <= b[5] + AABB_PADDING and
         a[5] + AABB_PADDING >= b[2] - AABB_PADDING
     )
+
+
+def _find_overlap_pairs(aabbs):
+    """
+    Find all AABB-overlapping pairs using sorted-sweep on the X axis
+    then verifying Y and Z overlap. Returns set of (i,j) with i < j.
+    """
+    n = len(aabbs)
+    x_sorted = sorted(range(n), key=lambda i: aabbs[i][0] - AABB_PADDING)
+    pairs = set()
+
+    for pos in range(n):
+        i = x_sorted[pos]
+        ax_min = aabbs[i][0] - AABB_PADDING
+        ax_max = aabbs[i][3] + AABB_PADDING
+        for scan in range(pos + 1, n):
+            j = x_sorted[scan]
+            jx_min = aabbs[j][0] - AABB_PADDING
+            if jx_min > ax_max:
+                break
+            if _aabbs_overlap(aabbs[i], aabbs[j]):
+                pair = (min(i, j), max(i, j))
+                pairs.add(pair)
+
+    return pairs
 
 
 def _estimate_contact_area(contact_points, normals):
@@ -114,44 +139,6 @@ def _convex_hull_area_2d(points):
     return abs(area) / 2.0
 
 
-class _SimpleRTree:
-    """
-    Minimal R-tree-like spatial index using sorted AABB intervals.
-    Uses sweep-line overlap detection for candidate pair generation.
-    """
-
-    def __init__(self, aabbs):
-        self.aabbs = aabbs
-        self.n = len(aabbs)
-
-    def query_pairs(self):
-        """Return set of (i,j) pairs with overlapping AABBs, i < j."""
-        pairs = set()
-
-        for axis in range(3):
-            lo_idx = axis
-            hi_idx = axis + 3
-            intervals = []
-            for i in range(self.n):
-                intervals.append((self.aabbs[i][lo_idx] - AABB_PADDING, i, 's'))
-                intervals.append((self.aabbs[i][hi_idx] + AABB_PADDING, i, 'e'))
-            intervals.sort(key=lambda x: (x[0], 0 if x[2] == 's' else 1))
-
-            active = set()
-            for _, idx, typ in intervals:
-                if typ == 's':
-                    active.add(idx)
-                else:
-                    active.discard(idx)
-                    continue
-                for other in list(active):
-                    if other != idx:
-                        pair = (min(idx, other), max(idx, other))
-                        pairs.add(pair)
-
-        return pairs
-
-
 def _check_pair_contact(shape_a, shape_b):
     """
     Run BRepExtrema distance check on a pair of shapes.
@@ -197,7 +184,7 @@ def detect_contacts(parts, progress_callback=None):
     """
     Detect contact relationships between all pairs of parts.
 
-    Uses R-tree-like spatial indexing to skip pairs that are far apart
+    Uses sorted-sweep AABB filtering to skip pairs that are far apart
     before running the expensive BRep distance computation.
     Also estimates contact area for each contact pair.
 
@@ -216,10 +203,13 @@ def detect_contacts(parts, progress_callback=None):
     for part in parts:
         aabbs.append(_compute_aabb(part["shape"]))
 
-    rtree = _SimpleRTree(aabbs)
-    candidate_pairs = rtree.query_pairs()
-
+    candidate_pairs = _find_overlap_pairs(aabbs)
     total_pairs = len(candidate_pairs)
+
+    sys.stdout.write("  {} candidate pairs after AABB filter (of {} total)\n".format(
+        total_pairs, n * (n - 1) // 2))
+    sys.stdout.flush()
+
     done = 0
 
     for i, j in sorted(candidate_pairs):
@@ -229,8 +219,15 @@ def detect_contacts(parts, progress_callback=None):
         name_b = parts[j]["name"]
 
         done += 1
-        if progress_callback and done % 50 == 0:
-            progress_callback(done, total_pairs, "{} <-> {}".format(name_a, name_b))
+        if done % 20 == 0 or done == total_pairs:
+            msg = "    pair {}/{}: {} <-> {}{}".format(
+                done, total_pairs, name_a, name_b,
+                " ..." if done < total_pairs else " done")
+            sys.stdout.write("\r" + msg)
+            sys.stdout.flush()
+            if progress_callback:
+                progress_callback(done, total_pairs,
+                                  "{} <-> {}".format(name_a, name_b))
 
         result = _check_pair_contact(shape_a, shape_b)
         if result is None:
@@ -256,6 +253,8 @@ def detect_contacts(parts, progress_callback=None):
             "contactArea": contact_area,
         })
 
+    sys.stdout.write("\n")
+    sys.stdout.flush()
     return contacts
 
 

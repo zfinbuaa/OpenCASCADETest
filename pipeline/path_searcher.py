@@ -9,21 +9,15 @@ import itertools
 from .collision_check import check_disassembly_path
 
 
-def find_feasible_direction(part_shape, other_shapes, preferred_dir,
+def find_feasible_direction(part_name, part_shape, other_shapes, preferred_dir,
                             max_distance=500.0, steps=20,
                             min_safe_fraction=0.5,
                             collision_data=None):
     """
     Search for a feasible disassembly direction.
 
-    Tries directions in this priority order:
-      1. Preferred direction (from contact normal)
-      2. 6 cardinal axes: +X, -X, +Y, -Y, +Z, -Z
-      3. 8 diagonal directions: all combinations of +/-1
-      4. 12 face-diagonal directions
-      5. Sorted by distance from preferred direction
-
     Args:
+        part_name: string name of the part.
         part_shape: TopoDS_Shape to move.
         other_shapes: list of (name, TopoDS_Shape) obstacles.
         preferred_dir: [x, y, z] initial guess.
@@ -45,7 +39,7 @@ def find_feasible_direction(part_shape, other_shapes, preferred_dir,
 
     for direction in candidates:
         result = check_disassembly_path(
-            part_shape, other_shapes, direction, max_distance, steps,
+            part_name, part_shape, other_shapes, direction, max_distance, steps,
             collision_data=collision_data)
 
         safe_dist = result["max_safe_distance"]
@@ -128,7 +122,7 @@ def compute_all_feasible_directions(parts, contacts, directions,
         others = [(p["name"], p["shape"]) for p in parts if p["name"] != name]
 
         found = find_feasible_direction(
-            shape, others, preferred, max_distance,
+            name, shape, others, preferred, max_distance,
             collision_data=collision_data)
         feasible[name] = found
 

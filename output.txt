@@ -1,0 +1,78 @@
+Total parts: 70
+Feasible: 31
+Blocked: 39
+Overall: FAIL
+------------------------------------------------------------
+[BLOCKED] Stage 1 | Part_1 | collision: Part_3 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_2 | collision: Part_62 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_3 | collision: Part_62 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_4 | collision: Part_62 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_5 | collision: Part_62 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_6 | collision: Part_69 | safe: 195.3mm
+[BLOCKED] Stage 1 | Part_7 | collision: Part_69 | safe: 197.3mm
+[BLOCKED] Stage 1 | Part_8 | collision: Part_62 | safe: 449.6mm
+[BLOCKED] Stage 1 | Part_9 | collision: Part_62 | safe: 474.6mm
+[BLOCKED] Stage 1 | Part_10 | collision: Part_28 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_11 | collision: Part_28 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_12 | collision: Part_28 | safe: 0.0mm
+[OK] Stage 1 | Part_14 | safe: 500.0mm
+[BLOCKED] Stage 1 | Part_15 | collision: Part_13 | safe: 470.3mm
+[OK] Stage 1 | Part_16 | safe: 500.0mm
+[OK] Stage 1 | Part_17 | safe: 500.0mm
+[BLOCKED] Stage 1 | Part_22 | collision: Part_21 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_23 | collision: Part_20 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_25 | collision: Part_20 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_26 | collision: Part_21 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_27 | collision: Part_19 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_28 | collision: Part_21 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_29 | collision: Part_40 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_30 | collision: Part_32 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_31 | collision: Part_32 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_32 | collision: Part_39 | safe: 0.0mm
+[OK] Stage 1 | Part_36 | safe: 500.0mm
+[OK] Stage 1 | Part_37 | safe: 500.0mm
+[OK] Stage 1 | Part_38 | safe: 500.0mm
+[OK] Stage 1 | Part_39 | safe: 500.0mm
+[OK] Stage 1 | Part_40 | safe: 500.0mm
+[BLOCKED] Stage 1 | Part_41 | collision: Part_42 | safe: 0.0mm
+[OK] Stage 1 | Part_45 | safe: 500.0mm
+[BLOCKED] Stage 1 | Part_46 | collision: Part_43 | safe: 246.5mm
+[BLOCKED] Stage 1 | Part_48 | collision: Part_49 | safe: 0.0mm
+[OK] Stage 1 | Part_50 | safe: 500.0mm
+[OK] Stage 1 | Part_51 | safe: 500.0mm
+[BLOCKED] Stage 1 | Part_52 | collision: Part_55 | safe: 57.4mm
+[BLOCKED] Stage 1 | Part_53 | collision: Part_44 | safe: 243.0mm
+[OK] Stage 1 | Part_54 | safe: 500.0mm
+[OK] Stage 1 | Part_56 | safe: 500.0mm
+[OK] Stage 1 | Part_57 | safe: 500.0mm
+[BLOCKED] Stage 1 | Part_58 | collision: Part_43 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_59 | collision: Part_44 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_60 | collision: Part_44 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_61 | collision: Part_43 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_62 | collision: Part_43 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_63 | collision: Part_44 | safe: 0.0mm
+[OK] Stage 1 | Part_64 | safe: 500.0mm
+[OK] Stage 1 | Part_65 | safe: 500.0mm
+[BLOCKED] Stage 1 | Part_66 | collision: Part_18 | safe: 0.0mm
+[BLOCKED] Stage 1 | Part_69 | collision: Part_70 | safe: 243.0mm
+[BLOCKED] Stage 1 | Part_70 | collision: Part_67 | safe: 492.2mm
+[OK] Stage 2 | Part_13 | safe: 500.0mm
+[BLOCKED] Stage 2 | Part_18 | collision: Part_24 | safe: 83.6mm
+[BLOCKED] Stage 2 | Part_19 | collision: Part_24 | safe: 127.0mm
+[OK] Stage 2 | Part_20 | safe: 500.0mm
+[OK] Stage 2 | Part_21 | safe: 500.0mm
+[OK] Stage 2 | Part_24 | safe: 500.0mm
+[OK] Stage 2 | Part_33 | safe: 500.0mm
+[OK] Stage 2 | Part_34 | safe: 500.0mm
+[OK] Stage 2 | Part_35 | safe: 500.0mm
+[OK] Stage 2 | Part_42 | safe: 500.0mm
+[OK] Stage 2 | Part_43 | safe: 500.0mm
+[OK] Stage 2 | Part_44 | safe: 500.0mm
+[OK] Stage 2 | Part_47 | safe: 500.0mm
+[OK] Stage 2 | Part_49 | safe: 500.0mm
+[OK] Stage 2 | Part_55 | safe: 500.0mm
+[OK] Stage 2 | Part_67 | safe: 500.0mm
+[OK] Stage 2 | Part_68 | safe: 500.0mm
+------------------------------------------------------------
+[Validate] Result: PARTIAL (31/70 parts feasible, 640.1s)
+验证失败，退出码: 

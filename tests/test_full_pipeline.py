@@ -65,8 +65,8 @@ def test_full_pipeline():
     # Phase 1: Analysis
     contacts = detect_contacts(parts)
     fasteners = identify_fasteners(parts, contacts)
-    directions = compute_all_directions(parts, contacts)
-    stages = build_disassembly_dag(parts, contacts, fasteners, directions)
+    directions = compute_all_directions(parts)
+    stages = build_disassembly_dag(parts, contacts, fasteners)
 
     assert len(contacts) >= 1, "Should detect contacts"
     assert len(stages) >= 1, "Should have stages"

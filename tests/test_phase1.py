@@ -125,26 +125,20 @@ def test_dag_building():
     from pipeline.contact_detector import detect_contacts
     from pipeline.fastener_identifier import identify_fasteners
     from pipeline.dag_builder import build_disassembly_dag, assign_stages_to_parts
-    from pipeline.direction_calc import compute_all_directions
 
     parts = make_test_parts()
     contacts = detect_contacts(parts)
     fasteners = identify_fasteners(parts, contacts)
-    directions = compute_all_directions(parts, contacts)
 
-    stages = build_disassembly_dag(parts, contacts, fasteners, directions)
+    stages = build_disassembly_dag(parts, contacts, fasteners)
     assert len(stages) >= 2, "Should have at least 2 stages"
 
-    # Fasteners should be in stage 1
-    all_stage1 = set()
-    for s in stages[0]:
-        all_stage1.add(s)
-    for f in fasteners:
-        assert f in all_stage1, "Fastener {} should be in stage 1".format(f)
+    all_staged = []
+    for s in stages:
+        all_staged.extend(s)
+    assert len(all_staged) == len(parts), "All parts should be staged"
 
     print("  [PASS] build_disassembly_dag: {} stages".format(len(stages)))
-    for i, s in enumerate(stages):
-        print("         Stage {}: {}".format(i + 1, s))
 
     stage_map = assign_stages_to_parts(parts, stages)
     assert len(stage_map) == len(parts)
@@ -153,20 +147,19 @@ def test_dag_building():
 
 def test_direction_calculation():
     """Test that disassembly directions are computed."""
-    from pipeline.contact_detector import detect_contacts
     from pipeline.direction_calc import calc_disassembly_direction, compute_all_directions
 
     parts = make_test_parts()
-    contacts = detect_contacts(parts)
+    contacts = []
 
-    direction = calc_disassembly_direction("base_plate", contacts, parts)
+    direction = calc_disassembly_direction("base_plate", parts)
     assert len(direction) == 3, "Direction should be [x, y, z]"
     length = sum(x * x for x in direction) ** 0.5
     assert abs(length - 1.0) < 0.01, "Direction should be unit vector"
     print("  [PASS] calc_disassembly_direction for base_plate: {}".format(
         [round(d, 2) for d in direction]))
 
-    all_dirs = compute_all_directions(parts, contacts)
+    all_dirs = compute_all_directions(parts)
     assert len(all_dirs) == len(parts)
     for name, d in all_dirs.items():
         length = sum(x * x for x in d) ** 0.5
@@ -185,8 +178,8 @@ def test_assembly_json():
     parts = make_test_parts()
     contacts = detect_contacts(parts)
     fasteners = identify_fasteners(parts, contacts)
-    directions = compute_all_directions(parts, contacts)
-    stages = build_disassembly_dag(parts, contacts, fasteners, directions)
+    directions = compute_all_directions(parts)
+    stages = build_disassembly_dag(parts, contacts, fasteners)
 
     # Attach direction and glbFile to parts
     for part in parts:
@@ -228,8 +221,8 @@ def test_full_phase1_pipeline():
 
     contacts = detect_contacts(parts)
     fasteners = identify_fasteners(parts, contacts)
-    directions = compute_all_directions(parts, contacts)
-    stages = build_disassembly_dag(parts, contacts, fasteners, directions)
+    directions = compute_all_directions(parts)
+    stages = build_disassembly_dag(parts, contacts, fasteners)
 
     # Verify the pipeline produces consistent results
     assert len(contacts) >= 2

@@ -8,7 +8,9 @@ Contains part list, groups, and disassembly stages.
 import json
 
 
-def build_assembly_json(parts, stages, source_file, contacts=None, fasteners=None):
+def build_assembly_json(parts, stages, source_file, contacts=None,
+                        fasteners=None, verified_directions=None,
+                        distance_multipliers=None):
     """
     Build the assembly.json data structure.
 
@@ -18,12 +20,18 @@ def build_assembly_json(parts, stages, source_file, contacts=None, fasteners=Non
         source_file: original STP file path (for metadata).
         contacts: (optional) contact list for stats.
         fasteners: (optional) list of fastener names.
+        verified_directions: (optional) dict of name -> [x,y,z] verified dirs.
+        distance_multipliers: (optional) dict of name -> float multipliers.
 
     Returns:
         dict: assembly.json compatible structure.
     """
     if fasteners is None:
         fasteners = []
+    if verified_directions is None:
+        verified_directions = {}
+    if distance_multipliers is None:
+        distance_multipliers = {}
 
     # Part entries
     part_entries = []
@@ -46,6 +54,10 @@ def build_assembly_json(parts, stages, source_file, contacts=None, fasteners=Non
     # Mark fasteners
     for entry in part_entries:
         entry["isFastener"] = entry["name"] in fasteners
+        if entry["name"] in verified_directions:
+            entry["direction"] = verified_directions[entry["name"]]
+        if entry["name"] in distance_multipliers:
+            entry["distanceMultiplier"] = distance_multipliers[entry["name"]]
 
     # Build groups (parts without explicit groups are solo groups)
     groups = []

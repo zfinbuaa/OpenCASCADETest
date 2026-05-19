@@ -63,7 +63,7 @@ def validate_disassembly_plan(parts, stages, directions, max_distance=500.0,
                     obstacles.append((other_name, other_part["shape"]))
 
             result = check_disassembly_path(
-                shape, obstacles, direction, max_distance,
+                name, shape, obstacles, direction, max_distance,
                 collision_data=collision_data)
 
             results.append({

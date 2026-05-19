@@ -2,12 +2,14 @@
 Swept collision detection along disassembly paths.
 
 Optimized version using triangle-mesh-level collision detection with
-AABB bounding-volume hierarchies and binary-search step refinement,
-replacing the extremely slow BRepAlgoAPI_Cut boolean approach.
+AABB bounding-volume hierarchies and binary-search step refinement.
 
+Includes direction search and AABB-level fast pre-filtering.
 Falls back to the BRep boolean method when mesh data is unavailable.
 """
 
+import sys
+import numpy as np
 from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Cut
 from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Transform
 from OCC.Core.gp import gp_Trsf, gp_Vec
@@ -16,15 +18,9 @@ from OCC.Core.BRepGProp import brepgprop
 from OCC.Core.Bnd import Bnd_Box
 from OCC.Core.BRepBndLib import brepbndlib
 
-import numpy as np
-
 
 def _shape_to_mesh_arrays(shape, linear_deflection=1.0):
-    """
-    Convert a B-Rep shape to numpy vertex and triangle arrays.
-
-    Returns (vertices_np, triangles_np) or (None, None) on failure.
-    """
+    """Convert a B-Rep shape to numpy vertex and triangle arrays."""
     from pipeline.mesher import brep_to_mesh
     try:
         verts, tris, _ = brep_to_mesh(shape, linear_deflection=linear_deflection)
@@ -35,6 +31,16 @@ def _shape_to_mesh_arrays(shape, linear_deflection=1.0):
         return v, t
     except Exception:
         return None, None
+
+
+def _compute_aabb_np(vertices):
+    """Compute AABB from vertex array. Returns (min_v, max_v) as ndarray(3)."""
+    return vertices.min(axis=0), vertices.max(axis=0)
+
+
+def _aabb_overlap_np(a_min, a_max, b_min, b_max):
+    """Check if two AABBs overlap."""
+    return bool(np.all(a_min <= b_max) and np.all(a_max >= b_min))
 
 
 class _AABBNode:
@@ -50,11 +56,7 @@ class _AABBNode:
 
 
 def _build_aabb_tree(vertices, triangles, max_leaf_size=8):
-    """
-    Build a simple AABB tree over triangles.
-
-    Returns the root node, or None if no triangles.
-    """
+    """Build a simple AABB tree over triangles."""
     n_tris = len(triangles)
     if n_tris == 0:
         return None
@@ -109,16 +111,8 @@ def _build_aabb_tree(vertices, triangles, max_leaf_size=8):
     return build(list(range(n_tris)))
 
 
-def _aabb_overlap(a_min, a_max, b_min, b_max):
-    """Check if two AABBs overlap."""
-    return bool(np.all(a_min <= b_max) and np.all(a_max >= b_min))
-
-
 def _triangles_overlap(v0, v1, v2, u0, u1, u2):
-    """
-    Fast triangle-triangle overlap test using separating axis theorem.
-    Uses the Moller implementation approach.
-    """
+    """Fast triangle-triangle overlap test using separating axis theorem."""
     e0 = v1 - v0
     e1 = v2 - v0
     n0 = np.cross(e0, e1)
@@ -149,9 +143,6 @@ def _triangles_overlap(v0, v1, v2, u0, u1, u2):
                 continue
             axis /= la2 ** 0.5
 
-            pa = np.dot(axis, v0)
-            pb = np.dot(axis, u0)
-
             a_vals = [np.dot(axis, v0), np.dot(axis, v1), np.dot(axis, v2)]
             b_vals = [np.dot(axis, u0), np.dot(axis, u1), np.dot(axis, u2)]
 
@@ -164,18 +155,20 @@ def _triangles_overlap(v0, v1, v2, u0, u1, u2):
 
 
 def _check_mesh_intersection(moved_verts, moved_tris, moved_tree,
-                             obs_verts, obs_tris, obs_tree):
-    """
-    Check for triangle-level intersection between two mesh AABB trees.
+                             moved_aabb_min, moved_aabb_max,
+                             obs_verts, obs_tris, obs_tree,
+                             obs_aabb_min, obs_aabb_max):
+    """Check for triangle-level intersection between two mesh AABB trees."""
+    if not _aabb_overlap_np(moved_aabb_min, moved_aabb_max,
+                            obs_aabb_min, obs_aabb_max):
+        return False
 
-    Returns True if any triangle pair intersects.
-    """
     if moved_tree is None or obs_tree is None:
         return False
 
     def traverse(node_a, node_b):
-        if not _aabb_overlap(node_a.min_v, node_a.max_v,
-                             node_b.min_v, node_b.max_v):
+        if not _aabb_overlap_np(node_a.min_v, node_a.max_v,
+                                node_b.min_v, node_b.max_v):
             return False
 
         a_leaf = node_a.is_leaf
@@ -224,21 +217,27 @@ class MeshCollisionData:
             shape, linear_deflection)
         if self.vertices is not None:
             self.tree = _build_aabb_tree(self.vertices, self.triangles)
+            self.aabb_min, self.aabb_max = _compute_aabb_np(self.vertices)
         else:
             self.tree = None
+            self.aabb_min = None
+            self.aabb_max = None
         self.volume = _compute_volume(shape)
 
 
 def prepare_collision_data(parts, linear_deflection=1.0):
-    """
-    Pre-compute mesh and AABB data for all parts.
-
-    Returns dict: part_name -> MeshCollisionData
-    """
+    """Pre-compute mesh and AABB data for all parts."""
     data = {}
-    for part in parts:
+    n = len(parts)
+    for idx, part in enumerate(parts):
         name = part["name"]
+        if n > 10 and (idx % 10 == 0 or idx == n - 1):
+            sys.stdout.write("\r  meshing for collision: {}/{}...".format(idx + 1, n))
+            sys.stdout.flush()
         data[name] = MeshCollisionData(part["shape"], linear_deflection)
+    if n > 10:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
     return data
 
 
@@ -262,20 +261,14 @@ def _has_interference_brep(moved_shape, obstacle_shape, moved_volume):
     return ratio > 0.001
 
 
-def check_disassembly_path(part_shape, other_shapes, direction,
+def check_disassembly_path(part_name, part_shape, other_shapes, direction,
                            max_distance=500.0, steps=20,
                            collision_data=None):
     """
     Check if a part can move along a direction without colliding.
 
-    Uses triangle-mesh-level collision with AABB trees when
-    collision_data is provided (fast), otherwise falls back to
-    BRep boolean operations (slow but reliable).
-
-    Uses coarse-then-binary-search: first scan with coarse steps,
-    then binary-search for the exact collision distance.
-
     Args:
+        part_name: string name of the part (for collision_data lookup).
         part_shape: TopoDS_Shape of the part to move.
         other_shapes: list of (name, TopoDS_Shape) tuples for obstacles.
         direction: [x, y, z] unit vector for movement direction.
@@ -284,19 +277,13 @@ def check_disassembly_path(part_shape, other_shapes, direction,
         collision_data: dict of name -> MeshCollisionData (optional).
 
     Returns:
-        dict: {
-            feasible: bool,
-            max_safe_distance: float (mm),
-            collision_at_step: int (-1 if no collision),
-            collision_with: str or None,
-            total_steps: int,
-        }
+        dict with feasible, max_safe_distance, collision_at_step, collision_with, total_steps.
     """
     dir_np = np.array(direction, dtype=np.float64)
 
     if collision_data is not None:
         return _check_path_mesh(
-            part_shape, other_shapes, dir_np,
+            part_name, part_shape, other_shapes, dir_np,
             max_distance, steps, collision_data)
 
     return _check_path_brep(
@@ -304,18 +291,10 @@ def check_disassembly_path(part_shape, other_shapes, direction,
         max_distance, steps)
 
 
-def _check_path_mesh(part_shape, other_shapes, dir_np,
+def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
                      max_distance, steps, collision_data):
-    """Mesh-based collision check with binary search refinement."""
-    part_name_hint = None
-    for name, _ in other_shapes:
-        break
-
-    part_data = None
-    for name, data in collision_data.items():
-        if data.shape is part_shape:
-            part_data = data
-            break
+    """Mesh-based collision check with AABB pre-filter and binary search."""
+    part_data = collision_data.get(part_name)
 
     if part_data is None or part_data.vertices is None or part_data.tree is None:
         return _check_path_brep(
@@ -326,14 +305,13 @@ def _check_path_mesh(part_shape, other_shapes, dir_np,
     for other_name, other_shape in other_shapes:
         od = collision_data.get(other_name)
         if od is None or od.vertices is None or od.tree is None:
-            obs_data_list.append((other_name, None, None, None, other_shape))
+            obs_data_list.append((other_name, None, None, None, None, None, other_shape))
         else:
             obs_data_list.append((other_name, od.vertices, od.triangles,
-                                  od.tree, other_shape))
+                                  od.tree, od.aabb_min, od.aabb_max, other_shape))
 
     coarse_steps = max(5, steps // 4)
     step_size = max_distance / coarse_steps
-    dir_vec = gp_Vec(dir_np[0], dir_np[1], dir_np[2])
 
     collision_step = -1
     collision_name = None
@@ -343,13 +321,15 @@ def _check_path_mesh(part_shape, other_shapes, dir_np,
         offset = dir_np * dist
 
         moved_verts = part_data.vertices + offset
-
         moved_tree = _build_aabb_tree(moved_verts, part_data.triangles)
+        moved_aabb_min, moved_aabb_max = _compute_aabb_np(moved_verts)
 
-        for other_name, obs_v, obs_t, obs_tree, obs_shape in obs_data_list:
-            if obs_tree is not None:
+        for other_name, obs_v, obs_t, obs_tree, obs_amin, obs_amax, obs_shape in obs_data_list:
+            if obs_tree is not None and obs_amin is not None:
                 if _check_mesh_intersection(moved_verts, part_data.triangles,
-                                            moved_tree, obs_v, obs_t, obs_tree):
+                                            moved_tree, moved_aabb_min, moved_aabb_max,
+                                            obs_v, obs_t, obs_tree,
+                                            obs_amin, obs_amax):
                     collision_step = step
                     collision_name = other_name
                     break
@@ -383,12 +363,15 @@ def _check_path_mesh(part_shape, other_shapes, dir_np,
         offset = dir_np * mid
         moved_verts = part_data.vertices + offset
         moved_tree = _build_aabb_tree(moved_verts, part_data.triangles)
+        moved_aabb_min, moved_aabb_max = _compute_aabb_np(moved_verts)
 
         hit = False
-        for other_name, obs_v, obs_t, obs_tree, obs_shape in obs_data_list:
-            if obs_tree is not None:
+        for other_name, obs_v, obs_t, obs_tree, obs_amin, obs_amax, obs_shape in obs_data_list:
+            if obs_tree is not None and obs_amin is not None:
                 if _check_mesh_intersection(moved_verts, part_data.triangles,
-                                            moved_tree, obs_v, obs_t, obs_tree):
+                                            moved_tree, moved_aabb_min, moved_aabb_max,
+                                            obs_v, obs_t, obs_tree,
+                                            obs_amin, obs_amax):
                     hit = True
                     break
             else:
@@ -452,15 +435,68 @@ def _check_path_brep(part_shape, other_shapes, direction,
     }
 
 
-def check_obstacle_set(part_shape, obstacle_set, direction,
-                       max_distance=500.0, steps=20):
+def find_best_feasible_direction(part_name, part_shape, obstacle_shapes,
+                                  preferred_dir, max_distance=500.0,
+                                  collision_data=None):
     """
-    Simple interference check: is there any obstacle in the path?
+    Search for a feasible disassembly direction for a part.
+
+    Tries directions in priority order:
+    1. preferred_dir
+    2. 26 candidate directions sorted by dot(preferred, candidate)
 
     Returns:
-        (bool, float): (is_feasible, safe_distance)
+        tuple: (best_direction, check_result)
+            best_direction: [x, y, z]
+            check_result: dict from check_disassembly_path
     """
+    preferred = np.array(preferred_dir, dtype=np.float64)
+    pnorm = np.linalg.norm(preferred)
+
+    sorted_candidates = []
+    for cand in CANDIDATE_DIRS:
+        if pnorm > 1e-10:
+            dot = float(np.dot(preferred / pnorm, cand))
+        else:
+            dot = 0.0
+        sorted_candidates.append((dot, cand.tolist()))
+
+    sorted_candidates.sort(key=lambda x: -x[0])
+
+    best_result = None
+    best_dir = None
+    best_safe = -1.0
+
+    for _, direction in sorted_candidates:
+        result = check_disassembly_path(
+            part_name, part_shape, obstacle_shapes, direction,
+            max_distance, steps=20, collision_data=collision_data)
+
+        if result["feasible"]:
+            return direction, result
+
+        if result["max_safe_distance"] > best_safe:
+            best_safe = result["max_safe_distance"]
+            best_result = result
+            best_dir = direction
+
+    if best_dir is None:
+        best_dir = preferred_dir
+        best_result = {
+            "feasible": False,
+            "max_safe_distance": 0.0,
+            "collision_at_step": 1,
+            "collision_with": None,
+            "total_steps": 20,
+        }
+
+    return best_dir, best_result
+
+
+def check_obstacle_set(part_shape, obstacle_set, direction,
+                       max_distance=500.0, steps=20):
+    """Simple interference check: is there any obstacle in the path?"""
     others = [(str(i), s) for i, s in enumerate(obstacle_set)]
-    result = check_disassembly_path(part_shape, others, direction,
+    result = check_disassembly_path("part", part_shape, others, direction,
                                     max_distance, steps)
     return result["feasible"], result["max_safe_distance"]

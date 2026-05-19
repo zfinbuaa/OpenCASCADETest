@@ -61,14 +61,14 @@ def main():
     from pipeline.gltf_exporter import export_assembly_indexed
     from pipeline.contact_detector import detect_contacts
     from pipeline.fastener_identifier import identify_fasteners
-    from pipeline.dag_builder import build_disassembly_dag
+    from pipeline.dag_builder import build_disassembly_dag_v2
     from pipeline.direction_calc import compute_all_directions
     from pipeline.assembly_json import build_assembly_json, write_assembly_json
 
     t_total = time.time()
 
     # Step 1
-    log("[1/7] Reading STEP: {}".format(args.input))
+    log("[1/8] Reading STEP: {}".format(args.input))
     t0 = time.time()
     doc = read_stp_with_doc(args.input)
     log("  Read in {:.1f}s".format(time.time() - t0))
@@ -79,76 +79,102 @@ def main():
         return 1
 
     # Step 2
-    log("[2/7] Extracting assembly tree...")
+    log("[2/8] Extracting assembly tree...")
     t0 = time.time()
     roots = extract_assembly_tree(doc)
-    parts = flatten_assembly_tree(roots)
-    log("  {} leaf parts extracted ({:.1f}s)".format(len(parts), time.time() - t0))
+    parts, sub_assemblies = flatten_assembly_tree(roots)
+    log("  {} leaf parts, {} sub-assemblies ({:.1f}s)".format(
+        len(parts), len(sub_assemblies), time.time() - t0))
     if len(parts) == 0:
         log("ERROR: No parts found")
         return 1
 
     # Step 3
-    log("[3/7] Meshing + exporting glb (deflection={}mm)...".format(args.mesh_deflection))
+    log("[3/8] Meshing + exporting glb (deflection={}mm)...".format(args.mesh_deflection))
     t0 = time.time()
     parts = export_assembly_indexed(parts, parts_dir)
     log("  {} glb files written ({:.1f}s)".format(len(parts), time.time() - t0))
 
     # Step 4
-    log("[4/7] Detecting contacts ({} pairs)...".format(len(parts) * (len(parts) - 1) // 2))
+    log("[4/8] Detecting contacts ({} pairs)...".format(len(parts) * (len(parts) - 1) // 2))
     t0 = time.time()
     contacts = detect_contacts(parts)
     log("  {} contact pairs ({:.1f}s)".format(len(contacts), time.time() - t0))
 
+    # Step 5
     fasteners = identify_fasteners(parts, contacts)
     if fasteners:
         log("  {} fasteners: {}".format(len(fasteners), ", ".join(fasteners[:10])))
     else:
         log("  No fasteners identified")
 
-    # Step 5
-    log("[5/7] Building disassembly DAG...")
+    # Step 6
+    log("[6/8] Computing outward directions...")
     t0 = time.time()
-    directions = compute_all_directions(parts, contacts)
-    stages = build_disassembly_dag(parts, contacts, fasteners, directions)
-    log("  {} disassembly stages ({:.1f}s)".format(len(stages), time.time() - t0))
-
-    # Attach direction to each part dict so it appears in assembly.json
+    directions = compute_all_directions(parts, sub_assemblies)
     for part in parts:
         part["direction"] = directions.get(part["name"], [0, 1, 0])
-
-    # Step 6
-    if not args.skip_collision:
-        log("[6/7] Validating disassembly paths...")
-        from pipeline.path_validator import (
-            validate_disassembly_plan, generate_report
-        )
-        from pipeline.collision_check import prepare_collision_data
-        t0 = time.time()
-        log("  Pre-computing collision mesh data...")
-        collision_data = prepare_collision_data(parts)
-        validation = validate_disassembly_plan(
-            parts, stages, directions, max_distance=args.explosion_distance,
-            collision_data=collision_data,
-            progress_callback=lambda done, total, name: log(
-                "    collision {}/{}: {}".format(done, total, name))
-        )
-        report = generate_report(validation)
-        report_path = os.path.join(args.output_dir, "report.txt")
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(report)
-        log(report)
-        valid_str = "PASS" if validation["valid"] else "PARTIAL"
-        log("  Validation: {} ({}/{} parts, {:.1f}s)".format(
-            valid_str, validation["feasible_parts"],
-            validation["total_parts"], time.time() - t0))
-    else:
-        log("[6/7] Collision check skipped")
+    log("  {} directions computed ({:.1f}s)".format(len(directions), time.time() - t0))
 
     # Step 7
-    log("[7/7] Writing assembly.json...")
+    log("[7/8] Building collision-driven disassembly plan...")
     t0 = time.time()
-    assembly = build_assembly_json(parts, stages, args.input, contacts, fasteners)
+    from pipeline.collision_check import prepare_collision_data
+    from pipeline.direction_calc import _compute_assembly_centroid, _compute_centroids
+
+    log("  Pre-computing collision mesh data...")
+    collision_data = prepare_collision_data(parts)
+    centroids = _compute_centroids(parts)
+    assembly_centroid = _compute_assembly_centroid(parts, centroids)
+
+    stages, verified_dirs, dist_mults, details = build_disassembly_dag_v2(
+        parts, directions, collision_data, fasteners,
+        max_distance=args.explosion_distance,
+        assembly_centroid=assembly_centroid)
+
+    for part in parts:
+        name = part["name"]
+        if name in verified_dirs:
+            part["direction"] = verified_dirs[name]
+
+    feasible = sum(1 for d in details if d.get("feasible"))
+    blocked = len(details) - feasible
+    log("  {} stages, {}/{} parts feasible ({:.1f}s)".format(
+        len(stages), feasible, len(details), time.time() - t0))
+
+    # Write report
+    report_lines = []
+    report_lines.append("=" * 60)
+    report_lines.append("Collision-Driven Disassembly Plan Report")
+    report_lines.append("=" * 60)
+    report_lines.append("Total parts: {}".format(len(details)))
+    report_lines.append("Feasible:    {}".format(feasible))
+    report_lines.append("Blocked:     {}".format(blocked))
+    report_lines.append("Stages:      {}".format(len(stages)))
+    report_lines.append("-" * 60)
+    for d in details:
+        status = "OK" if d.get("feasible") else "BLOCKED"
+        line = "  [{}] Stage {:2d} | {:20s} | dir=[{}] | safe: {:.1f}mm".format(
+            status, d.get("stage", 0), d.get("part", ""),
+            ",".join("{:.1f}".format(x) for x in d.get("direction", [0, 0, 0])),
+            d.get("safe_distance", 0))
+        if not d.get("feasible") and d.get("collision_with"):
+            line += " | collision: {}".format(d["collision_with"])
+        report_lines.append(line)
+    report_lines.append("-" * 60)
+    report = "\n".join(report_lines)
+    report_path = os.path.join(args.output_dir, "report.txt")
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(report)
+    log(report)
+
+    # Step 8
+    log("[8/8] Writing assembly.json...")
+    t0 = time.time()
+    assembly = build_assembly_json(
+        parts, stages, args.input, contacts, fasteners,
+        verified_directions=verified_dirs,
+        distance_multipliers=dist_mults)
     json_path = os.path.join(args.output_dir, "assembly.json")
     write_assembly_json(assembly, json_path)
     log("  {} ({:.1f} KB, {:.1f}s)".format(
@@ -182,7 +208,7 @@ def _run_preview(args):
     log("[2/3] Extracting assembly tree...")
     t0 = time.time()
     roots = extract_assembly_tree(doc)
-    parts = flatten_assembly_tree(roots)
+    parts, sub_assemblies = flatten_assembly_tree(roots)
     log("  {} leaf parts ({:.1f}s)".format(len(parts), time.time() - t0))
     if len(parts) == 0:
         log("ERROR: No parts found")

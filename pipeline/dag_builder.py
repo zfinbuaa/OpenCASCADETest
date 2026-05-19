@@ -1,107 +1,252 @@
 """
-Disassembly Directed Acyclic Graph (DAG) builder.
+Disassembly DAG builder — collision-driven version.
 
-Constructs a DAG from contact relationships and produces ordered
-disassembly stages via topological sort.
+Generates disassembly stages by actually checking whether each part can
+be removed along a direction without colliding with remaining parts.
+Directions are verified and can be corrected during DAG construction.
 
-Direction-aware: Uses disassembly directions to determine which parts
-block which, creating a directed graph instead of the naive bidirectional
-approach. If part A's removal direction points toward part B, then B
-blocks A (A cannot be removed without first removing or moving past B).
-
-Rules:
-  1. Fasteners are removed first (stage 1).
-  2. After fasteners removed, parts with zero remaining blockers are next.
-  3. Continue BFS-like: at each stage, remove all parts that no longer
-     have any blocking contacts.
-  4. Deadlock: if no zero-blocker parts remain, pick the part with the
-     fewest remaining blockers as a forced-removal candidate.
+Algorithm:
+  1. Stage 1: Fasteners (try initial direction, search if blocked)
+  2. Stage 2+: Greedy BFS from outside-in (parts farthest from
+     assembly center first). For each part:
+     - Try initial direction with collision check
+     - If blocked, search 26 candidate directions
+     - If feasible → add to current stage, record verified direction
+     - If all directions blocked → defer to next stage
+  3. Deadlock: force-remove part with largest safe_distance
+  4. distanceMultiplier = stage_number (inner parts explode farther)
 """
 
+import sys
 import numpy as np
-from collections import deque
+from OCC.Core.GProp import GProp_GProps
+from OCC.Core.BRepGProp import brepgprop
 
 
-def _determine_blocking(contacts, directions):
+def _compute_centroid(shape):
+    """Compute centroid of a TopoDS_Shape."""
+    try:
+        props = GProp_GProps()
+        brepgprop.VolumeProperties(shape, props)
+        if props.Mass() > 1e-12:
+            c = props.CentreOfMass()
+            return np.array([c.X(), c.Y(), c.Z()])
+    except Exception:
+        pass
+    try:
+        props = GProp_GProps()
+        brepgprop.SurfaceProperties(shape, props)
+        c = props.CentreOfMass()
+        return np.array([c.X(), c.Y(), c.Z()])
+    except Exception:
+        return np.array([0.0, 0.0, 0.0])
+
+
+def build_disassembly_dag_v2(parts, directions, collision_data,
+                              fasteners, max_distance=500.0,
+                              assembly_centroid=None):
     """
-    Build direction-aware blocking relationships.
+    Collision-driven disassembly plan generation.
 
-    Part B blocks part A if:
-    - A and B are in contact, AND
-    - A's disassembly direction points toward B's centroid relative to A's.
+    For each part, tries to find a feasible removal direction by actually
+    checking collisions against remaining parts. Directions can be
+    corrected if the initial guess is blocked.
 
-    If direction information is unavailable or ambiguous, fall back to
-    bidirectional blocking (both directions).
+    Args:
+        parts: list of part dicts with 'name' and 'shape'.
+        directions: dict of name -> [x,y,z] initial direction guesses.
+        collision_data: dict from prepare_collision_data().
+        fasteners: list of fastener part names.
+        max_distance: movement distance for collision check (mm).
+        assembly_centroid: ndarray(3) assembly center point.
 
     Returns:
-        dict[str, set]: part_name -> set of part_names that block it.
+        tuple: (stages, verified_directions, distance_multipliers, details)
+            stages: list[list[str]] - stage -> part names
+            verified_directions: dict[str, list[float]] - name -> direction
+            distance_multipliers: dict[str, float] - name -> multiplier
+            details: list[dict] - per-part verification results
     """
-    blocked_by = {}
+    from pipeline.collision_check import (
+        check_disassembly_path, find_best_feasible_direction
+    )
 
-    for c in contacts:
-        a = c["partA"]
-        b = c["partB"]
+    part_map = {p["name"]: p for p in parts}
+    part_names = list(part_map.keys())
 
-        blocked_by.setdefault(a, set())
-        blocked_by.setdefault(b, set())
+    if assembly_centroid is None:
+        centroids = {p["name"]: _compute_centroid(p["shape"]) for p in parts}
+        assembly_centroid = np.mean(list(centroids.values()), axis=0)
+    else:
+        centroids = {p["name"]: _compute_centroid(p["shape"]) for p in parts}
 
-        avg_normal = np.array(c.get("avgNormal", [0, 0, 0]), dtype=np.float64)
-        area = c.get("contactArea", 1.0)
+    distances_to_center = {}
+    for name in part_names:
+        diff = centroids[name] - assembly_centroid
+        distances_to_center[name] = float(np.linalg.norm(diff))
 
-        dir_a = directions.get(a)
-        dir_b = directions.get(b)
+    verified_dirs = dict(directions)
+    remaining = set(part_names)
+    stages = []
+    details = []
+    distance_multipliers = {}
 
-        if dir_a is not None and dir_b is not None:
-            da = np.array(dir_a, dtype=np.float64)
-            da_norm = np.linalg.norm(da)
+    # ── Stage 1: Fasteners ──────────────────────────────────
+    fastener_set = set(fasteners) & remaining
+    if fastener_set:
+        sys.stdout.write("  Stage 1: checking {} fasteners...\n".format(
+            len(fastener_set)))
+        sys.stdout.flush()
 
-            db = np.array(dir_b, dtype=np.float64)
-            db_norm = np.linalg.norm(db)
+        stage1 = []
+        for name in sorted(fastener_set):
+            part = part_map[name]
+            obstacles = [(n, part_map[n]["shape"])
+                         for n in remaining if n != name]
 
-            if da_norm > 1e-10 and db_norm > 1e-10:
-                da_hat = da / da_norm
-                db_hat = db / db_norm
+            result = check_disassembly_path(
+                name, part["shape"], obstacles, verified_dirs[name],
+                max_distance, collision_data=collision_data)
 
-                normal_a_to_b = avg_normal.copy()
-                n_norm = np.linalg.norm(normal_a_to_b)
-                if n_norm > 1e-10:
-                    normal_a_to_b /= n_norm
-
-                alignment_a = float(np.dot(da_hat, normal_a_to_b))
-                if alignment_a > -0.3:
-                    blocked_by[a].add(b)
-
-                alignment_b = float(np.dot(db_hat, -normal_a_to_b))
-                if alignment_b > -0.3:
-                    blocked_by[b].add(a)
-
-                if abs(alignment_a) < 0.3 and abs(alignment_b) < 0.3:
-                    blocked_by[a].add(b)
-                    blocked_by[b].add(a)
+            if result["feasible"]:
+                stage1.append(name)
+                details.append({
+                    "part": name, "stage": 1, "feasible": True,
+                    "direction": verified_dirs[name],
+                    "safe_distance": result["max_safe_distance"],
+                })
             else:
-                blocked_by[a].add(b)
-                blocked_by[b].add(a)
-        else:
-            blocked_by[a].add(b)
-            blocked_by[b].add(a)
+                best_dir, best_result = find_best_feasible_direction(
+                    name, part["shape"], obstacles, verified_dirs[name],
+                    max_distance, collision_data)
 
-    return blocked_by
+                verified_dirs[name] = best_dir
+                stage1.append(name)
+                details.append({
+                    "part": name, "stage": 1,
+                    "feasible": best_result["feasible"],
+                    "direction": best_dir,
+                    "safe_distance": best_result["max_safe_distance"],
+                    "collision_with": best_result.get("collision_with"),
+                })
+
+            distance_multipliers[name] = 1
+
+        stages.append(stage1)
+        remaining -= set(stage1)
+
+        sys.stdout.write("    {} fasteners placed in stage 1\n".format(
+            len(stage1)))
+        sys.stdout.flush()
+
+    # ── Stage 2+: Outer-to-inner greedy BFS ─────────────────
+    stage_num = 2
+    max_stages = len(part_names)
+
+    while remaining and stage_num <= max_stages:
+        sorted_remaining = sorted(remaining,
+                                  key=lambda n: distances_to_center.get(n, 0),
+                                  reverse=True)
+
+        sys.stdout.write("  Stage {}: checking {} remaining parts...\n".format(
+            stage_num, len(sorted_remaining)))
+        sys.stdout.flush()
+
+        current_stage = []
+        stage_details = []
+        best_deferred = None
+        best_deferred_safe = -1.0
+        best_deferred_dir = None
+
+        checked = 0
+        for name in sorted_remaining:
+            part = part_map[name]
+            obstacles = [(n, part_map[n]["shape"])
+                         for n in remaining if n != name]
+
+            result = check_disassembly_path(
+                name, part["shape"], obstacles, verified_dirs[name],
+                max_distance, collision_data=collision_data)
+
+            checked += 1
+
+            if result["feasible"]:
+                current_stage.append(name)
+                stage_details.append({
+                    "part": name, "stage": stage_num, "feasible": True,
+                    "direction": verified_dirs[name],
+                    "safe_distance": result["max_safe_distance"],
+                })
+            else:
+                best_dir, best_result = find_best_feasible_direction(
+                    name, part["shape"], obstacles, verified_dirs[name],
+                    max_distance, collision_data)
+
+                if best_result["feasible"]:
+                    verified_dirs[name] = best_dir
+                    current_stage.append(name)
+                    stage_details.append({
+                        "part": name, "stage": stage_num, "feasible": True,
+                        "direction": best_dir,
+                        "safe_distance": best_result["max_safe_distance"],
+                    })
+                else:
+                    if best_result["max_safe_distance"] > best_deferred_safe:
+                        best_deferred_safe = best_result["max_safe_distance"]
+                        best_deferred = name
+                        best_deferred_dir = best_dir
+
+                    stage_details.append({
+                        "part": name, "stage": stage_num, "feasible": False,
+                        "direction": best_dir,
+                        "safe_distance": best_result["max_safe_distance"],
+                        "collision_with": best_result.get("collision_with"),
+                    })
+
+            if checked % 10 == 0:
+                sys.stdout.write(
+                    "\r    checked {}/{} ({} feasible so far)".format(
+                        checked, len(sorted_remaining), len(current_stage)))
+                sys.stdout.flush()
+
+        if not current_stage and best_deferred is not None:
+            verified_dirs[best_deferred] = best_deferred_dir
+            current_stage.append(best_deferred)
+            for d in stage_details:
+                if d["part"] == best_deferred:
+                    d["feasible"] = False
+                    d["direction"] = best_deferred_dir
+                    d["note"] = "force-removed"
+                    break
+
+        if current_stage:
+            for name in current_stage:
+                distance_multipliers[name] = stage_num
+            stages.append(current_stage)
+            remaining -= set(current_stage)
+            details.extend(stage_details)
+
+            sys.stdout.write(
+                "\r    stage {} done: {} parts removed, {} remaining  \n".format(
+                    stage_num, len(current_stage), len(remaining)))
+            sys.stdout.flush()
+        else:
+            sys.stdout.write(
+                "    WARNING: no parts could be removed at stage {}\n".format(
+                    stage_num))
+            sys.stdout.flush()
+            break
+
+        stage_num += 1
+
+    return stages, verified_dirs, distance_multipliers, details
 
 
 def build_disassembly_dag(parts, contacts, fasteners=None, directions=None):
     """
-    Build disassembly stages from part-contact graph with direction awareness.
+    Legacy DAG builder (contact-graph based, no collision verification).
 
-    Args:
-        parts: list of part dicts with 'name'.
-        contacts: list of contact dicts from detect_contacts().
-        fasteners: list of part name strings to remove first (optional).
-        directions: dict of name -> [x,y,z] unit vectors (optional).
-                    If provided, used to determine directional blocking.
-
-    Returns:
-        list[list[str]]: Each inner list is a stage containing part names
-                         to be removed in that order.
+    Kept for --validate mode compatibility.
     """
     if fasteners is None:
         fasteners = []
@@ -109,17 +254,11 @@ def build_disassembly_dag(parts, contacts, fasteners=None, directions=None):
     part_names = [p["name"] for p in parts]
     fastener_set = set(fasteners)
 
-    for name in part_names:
-        pass
-
-    if directions is not None:
-        blocked_by = _determine_blocking(contacts, directions)
-    else:
-        blocked_by = {name: set() for name in part_names}
-        for c in contacts:
-            a, b = c["partA"], c["partB"]
-            blocked_by[a].add(b)
-            blocked_by[b].add(a)
+    blocked_by = {name: set() for name in part_names}
+    for c in contacts:
+        a, b = c["partA"], c["partB"]
+        blocked_by[a].add(b)
+        blocked_by[b].add(a)
 
     for name in part_names:
         if name not in blocked_by:
@@ -159,16 +298,7 @@ def build_disassembly_dag(parts, contacts, fasteners=None, directions=None):
 
 
 def assign_stages_to_parts(parts, stages):
-    """
-    Assign a stage number to each part based on the disassembly stages.
-
-    Args:
-        parts: list of part dicts with 'name'.
-        stages: list of stage lists from build_disassembly_dag().
-
-    Returns:
-        dict[str, int]: part_name -> stage_number (1-indexed)
-    """
+    """Assign a stage number to each part based on the disassembly stages."""
     stage_map = {}
     for idx, stage_parts in enumerate(stages):
         for name in stage_parts:
