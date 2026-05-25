@@ -30,7 +30,7 @@ let activeTab = 0;
 let pipelineMode = null;
 
 // ── Shared singletons ─────────────────────────────────────
-const sm = new SceneManager(viewport, { backgroundColor: 0xe8ecf0 });
+const sm = new SceneManager(viewport, { backgroundColor: 0xffffff });
 const modelLoader = new ModelLoader();
 const bodyLoader = new BodyLoader();
 const annot = new Annotation(sm.scene, sm.camera, viewport);
@@ -42,6 +42,9 @@ const shared = {
   loaded: null,
   meshes: [],
   groups: [],
+  fixedPartIds: new Set(),
+  hierarchy: null,
+  selectedNode: null,
 };
 
 // ── Per-tab state ─────────────────────────────────────────
@@ -97,16 +100,33 @@ function renderPositionPanel() {
     h += '<option value="' + b.name + '">' + b.name + '</option>';
   }
   h += '</select>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-import-body">导入新壳</button>';
+  h += '</div>';
   h += '<div class="section-title">目标部件</div>';
   h += '<div class="btn-group"><button class="btn btn-pri" id="btn-load">加载装配数据</button></div>';
+  h += '<div class="section-title">视角</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-vfront">前视</button>';
+  h += '<button class="btn btn-outline" id="btn-vback">后视</button>';
+  h += '<button class="btn btn-outline" id="btn-vleft">左视</button>';
+  h += '<button class="btn btn-outline" id="btn-vright">右视</button>';
+  h += '<button class="btn btn-outline" id="btn-vtop">俯视</button>';
+  h += '<button class="btn btn-outline" id="btn-viso">等轴测</button>';
+  h += '</div>';
   h += '<div class="section-title">标注导出</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-outline" id="btn-annot-show">显示标注</button>';
   h += '<button class="btn btn-outline" id="btn-annot-hide">清除标注</button>';
   h += '<button class="btn btn-outline" id="btn-export">导出 PNG</button>';
   h += '</div>';
-  h += '<div class="section-title">结构树 (点击色块改颜色)</div>';
-  h += '<div id="tree-container" style="max-height:260px;overflow-y:auto;"></div>';
+  h += '<div class="section-title">固定参照</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-set-fixed">设为固定参照</button>';
+  h += '<button class="btn btn-outline" id="btn-clear-fixed">取消固定</button>';
+  h += '</div>';
+  h += '<div class="section-title">结构树</div>';
+  h += '<div id="tree-container" style="max-height:220px;overflow-y:auto;"></div>';
   panelBody.innerHTML = h;
   bindPositionPanel();
 }
@@ -121,18 +141,38 @@ function renderExplosionPanel() {
   h += '<button class="btn btn-pri" id="btn-explode">逐阶段爆炸</button>';
   h += '<button class="btn btn-outline" id="btn-explode-instant">一键爆炸</button>';
   h += '<button class="btn btn-outline" id="btn-reset">复位</button></div>';
+  h += '<div class="section-title">拆卸演示</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-pri" id="btn-disassemble">逐件拆卸演示</button>';
+  h += '<button class="btn btn-outline" id="btn-step">单步拆卸</button>';
+  h += '<button class="btn btn-outline" id="btn-restore">复位全部</button>';
+  h += '</div>';
   h += '<div class="section-title">手动移动</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-outline" id="btn-manual-on">开启拖拽</button>';
   h += '<button class="btn btn-outline" id="btn-manual-off">关闭拖拽</button></div>';
+  h += '<div class="section-title">视角</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-vfront">前视</button>';
+  h += '<button class="btn btn-outline" id="btn-vback">后视</button>';
+  h += '<button class="btn btn-outline" id="btn-vleft">左视</button>';
+  h += '<button class="btn btn-outline" id="btn-vright">右视</button>';
+  h += '<button class="btn btn-outline" id="btn-vtop">俯视</button>';
+  h += '<button class="btn btn-outline" id="btn-viso">等轴测</button>';
+  h += '</div>';
   h += '<div class="section-title">标注导出</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-outline" id="btn-annot-show">显示标注</button>';
   h += '<button class="btn btn-outline" id="btn-annot-hide">清除标注</button>';
   h += '<button class="btn btn-outline" id="btn-thrust">推力线</button>';
   h += '<button class="btn btn-outline" id="btn-export">导出 PNG</button></div>';
+  h += '<div class="section-title">固定参照</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-set-fixed">设为固定参照</button>';
+  h += '<button class="btn btn-outline" id="btn-clear-fixed">取消固定</button>';
+  h += '</div>';
   h += '<div class="section-title">结构树</div>';
-  h += '<div id="tree-container" style="max-height:200px;overflow-y:auto;"></div>';
+  h += '<div id="tree-container" style="max-height:180px;overflow-y:auto;"></div>';
   panelBody.innerHTML = h;
   bindExplosionPanel();
 }
@@ -143,23 +183,108 @@ function renderDisassemblyPanel() {
   h += '<div id="pipeline-log-placeholder" style="margin:4px 10px;padding:6px;background:#0a0a1a;border-radius:3px;font-family:Consolas,monospace;font-size:9px;color:#7ec8e3;max-height:120px;overflow-y:auto;"></div>';
   h += '<div class="section-title">加载</div>';
   h += '<div class="btn-group"><button class="btn btn-pri" id="btn-load">加载装配数据</button></div>';
+  h += '<div class="section-title">层级拆装</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-pipeline-node">选中节点 → 生成拆装方案</button>';
+  h += '<span id="sel-node-display" style="padding:5px;color:#7ec8e3;font-size:11px;">未选中</span>';
+  h += '</div>';
   h += '<div class="section-title">爆炸</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-pri" id="btn-explode">逐阶段爆炸</button>';
   h += '<button class="btn btn-outline" id="btn-reset">复位</button></div>';
+  h += '<div class="section-title">拆卸演示</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-pri" id="btn-disassemble">逐件拆卸演示</button>';
+  h += '<button class="btn btn-outline" id="btn-step">单步拆卸</button>';
+  h += '<button class="btn btn-outline" id="btn-restore">复位全部</button>';
+  h += '</div>';
   h += '<div class="section-title">导出</div>';
   h += '<div class="btn-group"><button class="btn btn-outline" id="btn-export">导出 PNG</button></div>';
+  h += '<div class="section-title">固定参照</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-set-fixed">设为固定参照</button>';
+  h += '<button class="btn btn-outline" id="btn-clear-fixed">取消固定</button>';
+  h += '</div>';
   h += '<div class="section-title">拆装阶段</div>';
-  h += '<div id="tree-container" style="max-height:200px;overflow-y:auto;"></div>';
+  h += '<div id="tree-container" style="max-height:180px;overflow-y:auto;"></div>';
   panelBody.innerHTML = h;
   bindDisassemblyPanel();
 }
 
 // ── Panel Event Binders ──────────────────────────────────
 
+function _bindViewButtons() {
+  document.getElementById('btn-vfront')?.addEventListener('click', () => sm.viewFront());
+  document.getElementById('btn-vback')?.addEventListener('click', () => sm.viewBack());
+  document.getElementById('btn-vleft')?.addEventListener('click', () => sm.viewLeft());
+  document.getElementById('btn-vright')?.addEventListener('click', () => sm.viewRight());
+  document.getElementById('btn-vtop')?.addEventListener('click', () => sm.viewTop());
+  document.getElementById('btn-viso')?.addEventListener('click', () => sm.viewIsometric());
+}
+
+function _bindFixedButtons() {
+  document.getElementById('btn-set-fixed')?.addEventListener('click', () => {
+    const t = tabs[activeTab];
+    if (!t.tree) { statusBar.textContent = '请先加载数据'; return; }
+    const partIds = t.tree.getSelectedPartIds();
+    if (!partIds || partIds.length === 0) { statusBar.textContent = '请先在结构树中选择节点'; return; }
+    for (const id of partIds) shared.fixedPartIds.add(id);
+    for (const tab of tabs) tab.explo.setFixedPartIds(shared.fixedPartIds);
+    for (const tab of tabs) {
+      if (tab.tree) tab.tree.setFixedPartIds(shared.fixedPartIds);
+    }
+    statusBar.textContent = '已设为固定: ' + partIds.length + ' 个零件';
+  });
+  document.getElementById('btn-clear-fixed')?.addEventListener('click', () => {
+    shared.fixedPartIds.clear();
+    for (const tab of tabs) tab.explo.setFixedPartIds([]);
+    for (const tab of tabs) {
+      if (tab.tree) tab.tree.setFixedPartIds([]);
+    }
+    statusBar.textContent = '已取消所有固定参照';
+  });
+}
+
+function _bindDisassemblyButtons() {
+  document.getElementById('btn-disassemble')?.addEventListener('click', () => {
+    tabs[activeTab].explo.disassembleSequential(800);
+    statusBar.textContent = '逐件拆卸演示中...';
+  });
+  document.getElementById('btn-step')?.addEventListener('click', () => {
+    tabs[activeTab].explo.disassembleOneStep(600);
+    statusBar.textContent = '单步拆卸';
+  });
+  document.getElementById('btn-restore')?.addEventListener('click', () => {
+    tabs[activeTab].explo.restoreAll();
+    statusBar.textContent = '已复位全部零件';
+  });
+}
+
 function bindPositionPanel() {
   document.getElementById('sel-body')?.addEventListener('change', async (e) => {
     await bodyLoader.switchBody(e.target.selectedIndex, sm.scene);
+  });
+  document.getElementById('btn-import-body')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    statusBar.textContent = '导入车壳中...';
+    const result = await window.electronAPI.importBody();
+    if (result && result.ok) {
+      await bodyLoader.reloadBodies();
+      const sel = document.getElementById('sel-body');
+      if (sel) {
+        sel.innerHTML = '';
+        for (const b of bodyLoader.bodies) {
+          const opt = document.createElement('option');
+          opt.value = b.name;
+          opt.textContent = b.name;
+          sel.appendChild(opt);
+        }
+        sel.value = result.name;
+      }
+      statusBar.textContent = '车壳已导入: ' + result.name;
+    } else {
+      statusBar.textContent = '导入车壳失败';
+    }
   });
   document.getElementById('btn-load')?.addEventListener('click', loadAssembly);
   document.getElementById('btn-annot-show')?.addEventListener('click', () => {
@@ -168,6 +293,8 @@ function bindPositionPanel() {
   });
   document.getElementById('btn-annot-hide')?.addEventListener('click', () => annot.clear());
   document.getElementById('btn-export')?.addEventListener('click', _exportAnnotated);
+  _bindViewButtons();
+  _bindFixedButtons();
   buildActiveTree();
 }
 
@@ -192,6 +319,9 @@ function bindExplosionPanel() {
   document.getElementById('btn-annot-hide')?.addEventListener('click', () => annot.clear());
   document.getElementById('btn-thrust')?.addEventListener('click', () => tabs[activeTab].explo.toggleThrustLines());
   document.getElementById('btn-export')?.addEventListener('click', _exportAnnotated);
+  _bindViewButtons();
+  _bindFixedButtons();
+  _bindDisassemblyButtons();
   buildActiveTree();
 }
 
@@ -200,7 +330,18 @@ function bindDisassemblyPanel() {
   document.getElementById('btn-explode')?.addEventListener('click', () => tabs[activeTab].explo.explodeGroupsAnimated(800));
   document.getElementById('btn-reset')?.addEventListener('click', () => tabs[activeTab].explo.resetPositions());
   document.getElementById('btn-export')?.addEventListener('click', _exportSimple);
+  document.getElementById('btn-pipeline-node')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    const nodeName = shared.selectedNode;
+    if (!nodeName) { statusBar.textContent = '请先在结构树中选择一个节点'; return; }
+    statusBar.textContent = '启动管线 (节点: ' + nodeName + ')...';
+    await window.electronAPI.runPipelineForNode(nodeName);
+  });
+  _bindFixedButtons();
+  _bindDisassemblyButtons();
   buildActiveTree();
+  const display = document.getElementById('sel-node-display');
+  if (display) display.textContent = shared.selectedNode || '未选中';
 }
 
 function buildActiveTree() {
@@ -208,16 +349,19 @@ function buildActiveTree() {
   if (!container || !shared.assembly) return;
   const t = tabs[activeTab];
   t.tree = new TreeView(container, {
-    onSelect: (id) => {
-      _highlightPart(id);
-      for (const mesh of shared.meshes) {
-        if (mesh.userData.partId === id) {
-          const box = new THREE.Box3().setFromObject(mesh);
-          const c = new THREE.Vector3(); box.getCenter(c);
-          sm.focusOn(c, 300); break;
+    onSelect: (nodeId, partIds) => {
+      shared.selectedNode = nodeId;
+      _highlightParts(partIds);
+      if (partIds.length > 0) {
+        for (const mesh of shared.meshes) {
+          if (mesh.userData.partId === partIds[0]) {
+            const box = new THREE.Box3().setFromObject(mesh);
+            const c = new THREE.Vector3(); box.getCenter(c);
+            sm.focusOn(c, 300); break;
+          }
         }
       }
-      statusBar.textContent = '选中: ' + id;
+      statusBar.textContent = '选中: ' + nodeId + ' (' + partIds.length + ' 零件)';
     },
     onColorChange: (id, color) => {
       const c = new THREE.Color(color);
@@ -229,7 +373,8 @@ function buildActiveTree() {
       }
     },
   });
-  t.tree.build(shared.assembly.parts, shared.assembly.stages);
+  t.tree.build(shared.hierarchy, shared.assembly.parts, shared.assembly.stages);
+  t.tree.setFixedPartIds(shared.fixedPartIds);
 }
 
 // ── Load Assembly ────────────────────────────────────────
@@ -269,19 +414,21 @@ async function _loadModelCore(assembly, dir) {
       shared.meshes.push(m);
       meshCount++;
       if (!m.material) {
-        m.material = new THREE.MeshStandardMaterial({ color: p.color || 0x8899aa, roughness: 0.6, metalness: 0.1 });
+        m.material = new THREE.MeshStandardMaterial({ color: p.color || 0xbbbbbb, roughness: 0.5, metalness: 0.0 });
       } else if (Array.isArray(m.material)) {
         for (const mat of m.material) {
-          if (mat.color && mat.color.getHex() === 0xffffff && !p.color) mat.color.set(0x8899aa);
+          if (mat.color && mat.color.getHex() === 0xffffff && !p.color) mat.color.set(0xbbbbbb);
         }
       } else if (m.material.color && m.material.color.getHex() === 0xffffff && !p.color) {
-        m.material.color.set(0x8899aa);
+        m.material.color.set(0xbbbbbb);
       }
     }
     if (p.modelData && p.modelData.scene) sm.scene.add(p.modelData.scene);
   }
 
   shared.groups = AssemblyLoader._buildGroups(assembly, shared.loaded);
+  shared.hierarchy = assembly.hierarchy || [];
+  shared.fixedPartIds.clear();
   for (const t of tabs) t.explo.loadAssemblyGroups(shared.groups);
 
   _logPipeline('Loaded ' + shared.loaded.size + ' parts, ' + meshCount + ' meshes');
@@ -295,18 +442,12 @@ async function _loadModelCore(assembly, dir) {
 function _focusCamera() {
   sm.scene.updateMatrixWorld();
   const bbox = sm.getSceneBBox();
-  _logPipeline('BBox empty: ' + bbox.isEmpty());
   if (!bbox.isEmpty()) {
     const center = new THREE.Vector3(); bbox.getCenter(center);
     const size = new THREE.Vector3(); bbox.getSize(size);
     const diagonal = Math.sqrt(size.x * size.x + size.y * size.y + size.z * size.z);
-    _logPipeline('BBox size: ' + size.x.toFixed(0) + ', ' + size.y.toFixed(0) + ', ' + size.z.toFixed(0));
-    _logPipeline('Diagonal: ' + diagonal.toFixed(0));
-    const focusDist = Math.max(2500, diagonal * 0.65);
-    _logPipeline('Focus distance: ' + focusDist.toFixed(0));
-    sm.focusOn(center, focusDist);
+    sm.focusOn(center, diagonal);
   } else {
-    _logPipeline('WARNING: empty bbox, using default view');
     sm.resetCamera();
   }
   sm.controls.update();
@@ -360,8 +501,13 @@ function _clearHighlight() {
 }
 
 function _highlightPart(partId) {
+  _highlightParts([partId]);
+}
+
+function _highlightParts(partIds) {
   _clearHighlight();
-  const targetMeshes = shared.meshes.filter(m => m.userData.partId === partId);
+  const idSet = new Set(partIds);
+  const targetMeshes = shared.meshes.filter(m => idSet.has(m.userData.partId));
   for (const mesh of targetMeshes) {
     if (!mesh.material) continue;
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];

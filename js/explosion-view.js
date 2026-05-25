@@ -1,20 +1,14 @@
 /**
- * Explosion View — 爆炸动画 + TransformControls 手动拖拽。
+ * Explosion View — 爆炸动画 + TransformControls 手动拖拽 + 固定参照物。
  */
 
 import * as THREE from 'three';
-import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { TransformControls } from './three-addons/controls/TransformControls.js';
 
 const _CLICK_THRESHOLD = 5;
 
 export class ExplosionView {
 
-  /**
-   * @param {THREE.Scene} scene
-   * @param {THREE.Camera} camera
-   * @param {HTMLElement} domElement - renderer.domElement
-   * @param {THREE.OrbitControls} orbitControls - for disable during drag
-   */
   constructor(scene, camera, domElement, orbitControls) {
     this.scene = scene;
     this.camera = camera;
@@ -27,9 +21,16 @@ export class ExplosionView {
     this.explosionDistance = 150;
     this.isExploded = false;
     this._statusCallback = null;
+    this._fixedPartIds = new Set();
+    this._ghostMeshes = new Map();
 
     this._thrustLines = [];
     this._thrustVisible = false;
+
+    this._removedMeshes = new Map();
+    this._disassembling = false;
+    this._disassembleStage = 0;
+    this._pathLines = [];
 
     this.onClearHighlight = null;
 
@@ -59,6 +60,65 @@ export class ExplosionView {
     if (this._statusCallback) this._statusCallback(msg);
   }
 
+  // ── Fixed Reference ─────────────────────────────
+
+  setFixedPartIds(ids) {
+    const oldIds = new Set(this._fixedPartIds);
+    this._fixedPartIds = new Set(ids);
+
+    for (const [mesh] of this.originalPositions) {
+      const partId = mesh.userData.partId;
+      const wasFixed = oldIds.has(partId);
+      const isFixed = this._fixedPartIds.has(partId);
+      if (wasFixed !== isFixed) {
+        this._setMeshGhost(mesh, isFixed);
+      }
+    }
+
+    const count = this._fixedPartIds.size;
+    this._setStatus(count > 0 ? count + ' 个零件已设为固定' : '已取消所有固定');
+  }
+
+  getFixedPartIds() {
+    return new Set(this._fixedPartIds);
+  }
+
+  _isFixedMesh(mesh) {
+    return this._fixedPartIds.has(mesh.userData.partId);
+  }
+
+  _setMeshGhost(mesh, ghost) {
+    if (!mesh.material) return;
+    if (this._ghostMeshes.has(mesh) === ghost) return;
+
+    if (ghost && !this._ghostMeshes.has(mesh)) {
+      this._ghostMeshes.set(mesh, {
+        transparent: mesh.material.transparent,
+        opacity: mesh.material.opacity,
+        depthWrite: mesh.material.depthWrite,
+      });
+    }
+
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const mat of mats) {
+      mat.transparent = ghost;
+      mat.opacity = ghost ? 0.25 : 1.0;
+      mat.depthWrite = !ghost;
+      mat.needsUpdate = true;
+    }
+
+    if (!ghost && this._ghostMeshes.has(mesh)) {
+      const orig = this._ghostMeshes.get(mesh);
+      for (const mat of mats) {
+        mat.transparent = orig.transparent;
+        mat.opacity = orig.opacity;
+        mat.depthWrite = orig.depthWrite;
+        mat.needsUpdate = true;
+      }
+      this._ghostMeshes.delete(mesh);
+    }
+  }
+
   // ── Group Management ────────────────────────────
 
   loadAssemblyGroups(groups) {
@@ -69,6 +129,9 @@ export class ExplosionView {
         this.meshToGroup.set(mesh, g.id);
         this.originalPositions.set(mesh, mesh.position.clone());
         this.explodedPositions.set(mesh, mesh.position.clone());
+        if (this._isFixedMesh(mesh)) {
+          this._setMeshGhost(mesh, true);
+        }
       }
     }
     this._setStatus('已加载 ' + groups.length + ' 个装配编组');
@@ -77,10 +140,15 @@ export class ExplosionView {
   _clearGroups() {
     this._disableTransformCtrl();
     this.clearThrustLines();
+    this._clearPathLines();
     this.assemblyGroups = [];
     this.meshToGroup.clear();
     this.originalPositions.clear();
     this.explodedPositions.clear();
+    this._ghostMeshes.clear();
+    this._removedMeshes.clear();
+    this._disassembling = false;
+    this._disassembleStage = 0;
   }
 
   // ── Direction ───────────────────────────────────
@@ -123,6 +191,7 @@ export class ExplosionView {
         const dir = this._directionToVector(group.direction);
         const dist = this.explosionDistance * (group.distanceMultiplier || 1);
         for (const mesh of group.meshes) {
+          if (this._isFixedMesh(mesh)) continue;
           const origin = this.explodedPositions.get(mesh).clone();
           const target = origin.clone().add(dir.clone().multiplyScalar(dist));
           targets.set(mesh, target);
@@ -140,6 +209,7 @@ export class ExplosionView {
       const dir = this._directionToVector(g.direction);
       const dist = this.explosionDistance * (g.distanceMultiplier || 1);
       for (const mesh of g.meshes) {
+        if (this._isFixedMesh(mesh)) continue;
         const origin = this.originalPositions.get(mesh).clone();
         const target = origin.clone().add(dir.clone().multiplyScalar(dist));
         mesh.position.copy(target);
@@ -152,6 +222,7 @@ export class ExplosionView {
 
   resetPositions() {
     for (const [mesh, pos] of this.originalPositions) {
+      if (this._isFixedMesh(mesh)) continue;
       mesh.position.copy(pos);
       this.explodedPositions.set(mesh, pos.clone());
     }
@@ -187,7 +258,6 @@ export class ExplosionView {
 
   // ── Manual Move (TransformControls) ─────────────
 
-  /** 启用手动拖拽模式 */
   enableManualMode() {
     this._transformCtrl.enabled = true;
     this._setStatus('手动模式 — 点击零件拖拽');
@@ -196,7 +266,6 @@ export class ExplosionView {
     this.domElement.addEventListener('pointerup', this._onPointerUpBinded);
   }
 
-  /** 禁用手动拖拽模式 */
   disableManualMode() {
     this._transformCtrl.enabled = false;
     this._transformCtrl.detach();
@@ -234,6 +303,7 @@ export class ExplosionView {
 
     if (intersects.length > 0) {
       const mesh = intersects[0].object;
+      if (this._isFixedMesh(mesh)) return;
       if (this.meshToGroup.has(mesh)) {
         this._selectForTransform(mesh);
       }
@@ -264,6 +334,7 @@ export class ExplosionView {
     this.clearThrustLines();
     for (const [mesh, orig] of this.originalPositions) {
       if (!this.isExploded) break;
+      if (this._isFixedMesh(mesh)) continue;
       const exploded = this.explodedPositions.get(mesh);
       if (!exploded || exploded.equals(orig)) continue;
 
@@ -299,7 +370,264 @@ export class ExplosionView {
   dispose() {
     this._disableTransformCtrl();
     this.clearThrustLines();
+    this._clearPathLines();
     this.scene.remove(this._transformCtrl);
     this._transformCtrl.dispose();
+  }
+
+  _clearPathLines() {
+    for (const line of this._pathLines) {
+      this.scene.remove(line);
+    }
+    this._pathLines = [];
+  }
+
+  _getMeshOpacity(mesh) {
+    if (!mesh.material) return 1.0;
+    if (Array.isArray(mesh.material)) return mesh.material[0].opacity;
+    return mesh.material.opacity;
+  }
+
+  _getMeshTransparent(mesh) {
+    if (!mesh.material) return false;
+    if (Array.isArray(mesh.material)) return mesh.material[0].transparent;
+    return mesh.material.transparent;
+  }
+
+  _getMeshDepthWrite(mesh) {
+    if (!mesh.material) return true;
+    if (Array.isArray(mesh.material)) return mesh.material[0].depthWrite;
+    return mesh.material.depthWrite;
+  }
+
+  _setMeshOpacity(mesh, value, transparent) {
+    if (!mesh.material) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const mat of mats) {
+      mat.opacity = value;
+      if (transparent !== undefined) mat.transparent = transparent;
+      mat.depthWrite = value > 0.01;
+      mat.needsUpdate = true;
+    }
+  }
+
+  _showRemovalPath(meshes, dirVector, distance) {
+    for (const mesh of meshes) {
+      if (this._isFixedMesh(mesh)) continue;
+      const origin = this.originalPositions.get(mesh);
+      if (!origin) continue;
+      const target = origin.clone().add(dirVector.clone().multiplyScalar(distance));
+
+      const geom = new THREE.BufferGeometry().setFromPoints([origin, target]);
+      const mat = new THREE.LineDashedMaterial({
+        color: 0x44ff44, dashSize: 6, gapSize: 3, linewidth: 1,
+      });
+      const line = new THREE.Line(geom, mat);
+      line.computeLineDistances();
+      this.scene.add(line);
+      this._pathLines.push(line);
+    }
+  }
+
+  async _animateRemoval(meshes, dirVector, distance, duration) {
+    const targets = new Map();
+    for (const mesh of meshes) {
+      if (this._isFixedMesh(mesh)) continue;
+      const origin = this.explodedPositions.get(mesh);
+      if (!origin) continue;
+      const target = origin.clone().add(dirVector.clone().multiplyScalar(distance));
+      targets.set(mesh, target);
+    }
+    if (targets.size === 0) return;
+    await this._animateToPositions(targets, duration);
+    this._showRemovalPath(meshes, dirVector, distance);
+  }
+
+  async _fadeOut(meshes, duration = 400) {
+    const startTime = performance.now();
+    const startOpacities = new Map();
+
+    for (const mesh of meshes) {
+      if (this._isFixedMesh(mesh)) continue;
+      if (!mesh.material) continue;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      startOpacities.set(mesh, mats.map(m => m.opacity));
+      for (const mat of mats) {
+        mat.transparent = true;
+        mat.needsUpdate = true;
+      }
+    }
+
+    if (startOpacities.size === 0) return;
+
+    return new Promise((resolve) => {
+      const animate = () => {
+        const elapsed = performance.now() - startTime;
+        const t = Math.min(elapsed / Math.max(duration, 1), 1);
+        for (const [mesh, opacities] of startOpacities) {
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          for (let i = 0; i < mats.length; i++) {
+            mats[i].opacity = opacities[i] * (1 - t);
+            mats[i].needsUpdate = true;
+          }
+        }
+        if (t < 1) requestAnimationFrame(animate);
+        else resolve();
+      };
+      requestAnimationFrame(animate);
+    });
+  }
+
+  _removeMeshesFromScene(meshes, preFadeOpacities) {
+    for (const mesh of meshes) {
+      if (this._isFixedMesh(mesh)) continue;
+      if (this._removedMeshes.has(mesh)) continue;
+      const parent = mesh.parent;
+      if (!parent) continue;
+
+      const origPos = this.originalPositions.get(mesh);
+      const savedOpacity = preFadeOpacities
+        ? preFadeOpacities.get(mesh)
+        : this._getMeshOpacity(mesh);
+
+      this._removedMeshes.set(mesh, {
+        parent: parent,
+        position: origPos ? origPos.clone() : mesh.position.clone(),
+        opacity: savedOpacity !== undefined ? savedOpacity : 1.0,
+        transparent: this._getMeshTransparent(mesh),
+        depthWrite: this._getMeshDepthWrite(mesh),
+      });
+      parent.remove(mesh);
+    }
+  }
+
+  async disassembleSequential(duration = 600) {
+    if (this._disassembling) return;
+    if (this.assemblyGroups.length === 0) return;
+
+    this._disassembling = true;
+    this._disassembleStage = 0;
+
+    this.resetPositions();
+    this._clearPathLines();
+
+    try {
+      const stageMap = new Map();
+      for (const g of this.assemblyGroups) {
+        const s = g.stage || 1;
+        if (!stageMap.has(s)) stageMap.set(s, []);
+        stageMap.get(s).push(g);
+      }
+      const stages = Array.from(stageMap.keys()).sort((a, b) => a - b);
+      const stageDuration = Math.max(duration / stages.length, 300);
+
+      for (const stage of stages) {
+        this._disassembleStage = stage;
+        this._setStatus('拆卸阶段 ' + stage + ' / ' + stages.length);
+
+        const groups = stageMap.get(stage);
+        for (const group of groups) {
+          const dir = this._directionToVector(group.direction);
+          const dist = this.explosionDistance * (group.distanceMultiplier || 1);
+          const meshesToRemove = group.meshes.filter(m => !this._isFixedMesh(m));
+          if (meshesToRemove.length === 0) continue;
+
+          const preFadeOpacities = new Map();
+          for (const m of meshesToRemove) {
+            preFadeOpacities.set(m, this._getMeshOpacity(m));
+          }
+
+          await this._animateRemoval(meshesToRemove, dir, dist, stageDuration / 2);
+          await this._fadeOut(meshesToRemove, Math.max(stageDuration / 4, 200));
+          this._removeMeshesFromScene(meshesToRemove, preFadeOpacities);
+          await new Promise(r => setTimeout(r, 100));
+        }
+      }
+
+      this._setStatus('拆卸演示完成');
+    } catch (e) {
+      console.error('disassembleSequential error:', e);
+      this._setStatus('拆卸演示出错');
+    } finally {
+      this._disassembling = false;
+    }
+  }
+
+  async disassembleOneStep(duration = 600) {
+    if (this.assemblyGroups.length === 0) return;
+
+    if (this._disassembling) return;
+
+    const stageMap = new Map();
+    for (const g of this.assemblyGroups) {
+      const s = g.stage || 1;
+      if (!stageMap.has(s)) stageMap.set(s, []);
+      stageMap.get(s).push(g);
+    }
+    const stages = Array.from(stageMap.keys()).sort((a, b) => a - b);
+    const stageDuration = Math.max(duration, 400);
+
+    let found = false;
+    for (const stage of stages) {
+      if (this._disassembleStage > 0 && stage < this._disassembleStage) continue;
+      const groups = stageMap.get(stage);
+      for (const group of groups) {
+        const meshesToRemove = group.meshes.filter(m => !this._isFixedMesh(m));
+        if (meshesToRemove.length === 0) continue;
+        if (!this._removedMeshes.has(meshesToRemove[0])) {
+          const dir = this._directionToVector(group.direction);
+          const dist = this.explosionDistance * (group.distanceMultiplier || 1);
+
+          this._disassembling = true;
+          this._disassembleStage = stage;
+          this._setStatus('单步拆卸: 阶段 ' + stage);
+
+          try {
+            const preFadeOpacities = new Map();
+            for (const m of meshesToRemove) {
+              preFadeOpacities.set(m, this._getMeshOpacity(m));
+            }
+
+            await this._animateRemoval(meshesToRemove, dir, dist, stageDuration / 2);
+            await this._fadeOut(meshesToRemove, Math.max(stageDuration / 4, 200));
+            this._removeMeshesFromScene(meshesToRemove, preFadeOpacities);
+
+            this._setStatus('单步拆卸完成 — 阶段 ' + stage);
+          } catch (e) {
+            console.error('disassembleOneStep error:', e);
+            this._setStatus('单步拆卸出错');
+          } finally {
+            this._disassembling = false;
+          }
+          found = true;
+          break;
+        }
+      }
+      if (found) break;
+    }
+
+    if (!found) {
+      this._setStatus('所有阶段已完成拆卸 — 请先复位');
+    }
+  }
+
+  restoreAll() {
+    for (const [mesh, info] of this._removedMeshes) {
+      info.parent.add(mesh);
+      mesh.position.copy(info.position);
+      this.explodedPositions.set(mesh, info.position.clone());
+      mesh.visible = true;
+      this._setMeshOpacity(mesh, info.opacity, info.transparent);
+      if (info.depthWrite !== undefined && mesh.material) {
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const mat of mats) { mat.depthWrite = info.depthWrite; }
+      }
+    }
+    this._removedMeshes.clear();
+    this._clearPathLines();
+    this._disassembling = false;
+    this._disassembleStage = 0;
+    this.isExploded = false;
+    this._setStatus('已复位全部零件');
   }
 }

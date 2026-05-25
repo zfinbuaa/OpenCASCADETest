@@ -40,9 +40,17 @@ def main():
                         help="仅导入 STP → 网格化 → 导出 glb + JSON (跳过分析)")
     parser.add_argument("--validate", action="store_true",
                         help="仅对已有 assembly.json 运行碰撞验证")
+    parser.add_argument("--export-body", action="store_true",
+                        help="将 STP 转换为单个车壳 .glb（不拆分零件）")
+    parser.add_argument("--root-node", default=None,
+                        help="仅处理指定子装配节点下的零件（层级选择）")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # ── Body export mode: STP → single .glb body shell ──
+    if args.export_body:
+        return _run_body_export(args)
 
     # ── Preview mode: STP → glb only, no analysis ──
     if args.preview:
@@ -83,8 +91,13 @@ def main():
     t0 = time.time()
     roots = extract_assembly_tree(doc)
     parts, sub_assemblies = flatten_assembly_tree(roots)
-    log("  {} leaf parts, {} sub-assemblies ({:.1f}s)".format(
-        len(parts), len(sub_assemblies), time.time() - t0))
+    if args.root_node:
+        from pipeline.xcaf_utils import filter_parts_by_ancestor
+        filtered = filter_parts_by_ancestor(parts, args.root_node)
+        log("  {} leaf parts, {} sub-assemblies → {} under '{}' ({:.1f}s)".format(
+            len(parts), len(sub_assemblies), len(filtered),
+            args.root_node, time.time() - t0))
+        parts = filtered
     if len(parts) == 0:
         log("ERROR: No parts found")
         return 1
@@ -92,13 +105,24 @@ def main():
     # Step 3
     log("[3/8] Meshing + exporting glb (deflection={}mm)...".format(args.mesh_deflection))
     t0 = time.time()
-    parts = export_assembly_indexed(parts, parts_dir)
+    parts = export_assembly_indexed(parts, parts_dir,
+                                     linear_deflection=args.mesh_deflection)
     log("  {} glb files written ({:.1f}s)".format(len(parts), time.time() - t0))
+
+    # Pre-compute collision mesh data (shared for contact filter + DAG)
+    from pipeline.collision_check import prepare_collision_data
+    from pipeline.direction_calc import _compute_assembly_centroid, _compute_centroids
+
+    log("  Pre-computing mesh collision data...")
+    t_mesh = time.time()
+    collision_data = prepare_collision_data(parts)
+    log("  {} meshes ready ({:.1f}s)".format(len(collision_data), time.time() - t_mesh))
 
     # Step 4
     log("[4/8] Detecting contacts ({} pairs)...".format(len(parts) * (len(parts) - 1) // 2))
     t0 = time.time()
-    contacts = detect_contacts(parts)
+    contacts = detect_contacts(parts, intra_parent_only=True,
+                               collision_data=collision_data, parallel=True)
     log("  {} contact pairs ({:.1f}s)".format(len(contacts), time.time() - t0))
 
     # Step 5
@@ -111,7 +135,7 @@ def main():
     # Step 6
     log("[6/8] Computing outward directions...")
     t0 = time.time()
-    directions = compute_all_directions(parts, sub_assemblies)
+    directions = compute_all_directions(parts, contacts, sub_assemblies)
     for part in parts:
         part["direction"] = directions.get(part["name"], [0, 1, 0])
     log("  {} directions computed ({:.1f}s)".format(len(directions), time.time() - t0))
@@ -119,18 +143,15 @@ def main():
     # Step 7
     log("[7/8] Building collision-driven disassembly plan...")
     t0 = time.time()
-    from pipeline.collision_check import prepare_collision_data
-    from pipeline.direction_calc import _compute_assembly_centroid, _compute_centroids
 
-    log("  Pre-computing collision mesh data...")
-    collision_data = prepare_collision_data(parts)
     centroids = _compute_centroids(parts)
     assembly_centroid = _compute_assembly_centroid(parts, centroids)
 
     stages, verified_dirs, dist_mults, details = build_disassembly_dag_v2(
         parts, directions, collision_data, fasteners,
         max_distance=args.explosion_distance,
-        assembly_centroid=assembly_centroid)
+        assembly_centroid=assembly_centroid,
+        sub_assemblies=sub_assemblies)
 
     for part in parts:
         name = part["name"]
@@ -174,7 +195,8 @@ def main():
     assembly = build_assembly_json(
         parts, stages, args.input, contacts, fasteners,
         verified_directions=verified_dirs,
-        distance_multipliers=dist_mults)
+        distance_multipliers=dist_mults,
+        roots=roots)
     json_path = os.path.join(args.output_dir, "assembly.json")
     write_assembly_json(assembly, json_path)
     log("  {} ({:.1f} KB, {:.1f}s)".format(
@@ -216,11 +238,12 @@ def _run_preview(args):
 
     log("[3/3] Meshing + exporting glb...")
     t0 = time.time()
-    parts = export_assembly_indexed(parts, parts_dir)
+    parts = export_assembly_indexed(parts, parts_dir,
+                                     linear_deflection=args.mesh_deflection)
     log("  {} glb files ({:.1f}s)".format(len(parts), time.time() - t0))
 
     # Write minimal assembly.json (no stage/contact data)
-    assembly = build_assembly_json(parts, [], args.input)
+    assembly = build_assembly_json(parts, [], args.input, roots=roots)
     json_path = os.path.join(args.output_dir, "assembly.json")
     write_assembly_json(assembly, json_path)
     log("  assembly.json ({:.1f} KB)".format(os.path.getsize(json_path) / 1024))
@@ -286,7 +309,7 @@ def _run_validate(args):
     if not directions:
         # Compute directions from contacts
         from pipeline.contact_detector import detect_contacts
-        contacts = detect_contacts(parts)
+        contacts = detect_contacts(parts, intra_parent_only=True)
         directions = compute_all_directions(parts, contacts)
 
     log("[Validate] Running collision check ({} parts, {} stages)...".format(
@@ -313,6 +336,55 @@ def _run_validate(args):
         validation["total_parts"], time.time() - t0))
 
     return 0 if validation["valid"] else 2
+
+
+def _run_body_export(args):
+    """Export a STEP file as a single body shell .glb (no part splitting)."""
+    from pipeline.stp_reader import read_stp_with_doc
+    from pipeline.gltf_exporter import export_merged_glb
+    from OCC.Core.XCAFDoc import XCAFDoc_DocumentTool
+    from OCC.Core.TDF import TDF_LabelSequence
+    from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Builder
+    from OCC.Core.TopAbs import TopAbs_SOLID
+    from OCC.Core.TopExp import TopExp_Explorer
+
+    log("[1/2] Reading STEP: {}".format(args.input))
+    t0 = time.time()
+    doc = read_stp_with_doc(args.input)
+    log("  Read in {:.1f}s".format(time.time() - t0))
+
+    shape_tool = XCAFDoc_DocumentTool.ShapeTool(doc.Main())
+    compound = TopoDS_Compound()
+    builder = TopoDS_Builder()
+    builder.MakeCompound(compound)
+
+    free_labels = TDF_LabelSequence()
+    shape_tool.GetFreeShapes(free_labels)
+    solid_count = 0
+    for i in range(free_labels.Length()):
+        shape = shape_tool.GetShape(free_labels.Value(i + 1))
+        exp = TopExp_Explorer(shape, TopAbs_SOLID)
+        while exp.More():
+            builder.Add(compound, exp.Current())
+            solid_count += 1
+            exp.Next()
+
+    log("  {} solids collected".format(solid_count))
+
+    log("[2/2] Meshing + exporting glb...")
+    t0 = time.time()
+    os.makedirs(args.output_dir, exist_ok=True)
+    body_name = os.path.splitext(os.path.basename(args.input))[0]
+    output_path = os.path.join(args.output_dir, body_name + '.glb')
+
+    result = export_merged_glb(compound, output_path, body_name,
+                               linear_deflection=args.mesh_deflection)
+    if result:
+        log("  Body exported: {} ({:.1f}s)".format(result, time.time() - t0))
+    else:
+        log("  ERROR: Failed to mesh body")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

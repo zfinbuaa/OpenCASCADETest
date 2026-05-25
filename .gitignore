@@ -4,6 +4,9 @@ __pycache__/
 *.pyo
 output/
 preview_output/
+build/
+dist/
+release/
 .DS_Store
 Thumbs.db
 *.log

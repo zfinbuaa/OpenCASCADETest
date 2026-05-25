@@ -8,6 +8,14 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 
 let mainWindow = null;
+let _userBodiesDir = null;
+
+function getUserBodiesDir() {
+  if (!_userBodiesDir) {
+    _userBodiesDir = path.join(app.getPath('userData'), 'bodies');
+  }
+  return _userBodiesDir;
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -21,7 +29,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
-    title: '整车数模自动拆装方案系统',
+    title: '数模自动拆装工具',
   });
 
   mainWindow.loadFile('index.html');
@@ -117,7 +125,7 @@ function buildMenu() {
             dialog.showMessageBox(mainWindow, {
               type: 'info',
               title: '关于',
-              message: '整车三维数模自动拆装方案生成系统\n基于 OpenCASCADE + Three.js + Electron\n版本 2.0',
+              message: '数模自动拆装工具\n基于 OpenCASCADE + Three.js + Electron\n版本 2.0',
             });
           },
         },
@@ -168,6 +176,120 @@ ipcMain.handle('file-exists', async (_event, filePath) => {
   return fs.existsSync(filePath);
 });
 
+// ── Body shell management ─────────────────────────────────
+
+ipcMain.handle('list-user-bodies', async () => {
+  if (!fs.existsSync(getUserBodiesDir())) {
+    fs.mkdirSync(getUserBodiesDir(), { recursive: true });
+    return [];
+  }
+  const files = fs.readdirSync(getUserBodiesDir()).filter(f => f.endsWith('.glb'));
+  return files.map(f => ({
+    name: path.basename(f, '.glb'),
+    glb: 'local:///' + path.join(getUserBodiesDir(), f).replace(/\\/g, '/'),
+  }));
+});
+
+ipcMain.handle('import-body', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择车壳 STP 文件',
+    filters: [{ name: 'STEP 模型', extensions: ['stp', 'step'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+
+  const stpPath = result.filePaths[0];
+  const { exePath, baseArgs } = findPipelineExe();
+
+  if (!fs.existsSync(getUserBodiesDir())) {
+    fs.mkdirSync(getUserBodiesDir(), { recursive: true });
+  }
+
+  const args = [
+    ...baseArgs,
+    stpPath,
+    '--export-body',
+    '--output-dir', getUserBodiesDir(),
+  ];
+
+  mainWindow.webContents.send('pipeline-progress', '=== 导入车壳 ===');
+
+  return new Promise((resolve) => {
+    const env = buildPipelineEnv();
+    const proc = spawn(exePath, args, { env });
+
+    proc.stdout.on('data', (data) => {
+      const lines = data.toString().split('\n').filter(Boolean);
+      for (const line of lines) {
+        mainWindow.webContents.send('pipeline-progress', line);
+      }
+    });
+
+    proc.stderr.on('data', (data) => {
+      mainWindow.webContents.send('pipeline-progress', '[ERR] ' + data.toString().trim());
+    });
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        const bodyName = path.basename(stpPath, path.extname(stpPath));
+        resolve({ name: bodyName, ok: true });
+      } else {
+        resolve({ name: '', ok: false });
+      }
+    });
+  });
+});
+
+// ── Pipeline scoped to a sub-assembly node ─────────────────
+
+ipcMain.handle('run-pipeline-for-node', async (_event, rootNode) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择 STP 数模文件 (将仅处理节点: ' + (rootNode || '全部') + ')',
+    filters: [{ name: 'STEP 模型', extensions: ['stp', 'step'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths[0]) return;
+
+  const stpPath = result.filePaths[0];
+  const outputDir = path.join(path.dirname(stpPath), 'output');
+  const { exePath, baseArgs } = findPipelineExe();
+
+  const args = [
+    ...baseArgs,
+    stpPath,
+    '--output-dir', outputDir,
+    '--root-node', rootNode,
+  ];
+
+  mainWindow.webContents.send('pipeline-progress', '=== 生成拆卸方案 (节点: ' + rootNode + ') ===');
+  mainWindow.webContents.send('pipeline-mode', 'full');
+  mainWindow.webContents.send('pipeline-started', stpPath);
+
+  const env = buildPipelineEnv();
+  const proc = spawn(exePath, args, { env });
+
+  proc.stdout.on('data', (data) => {
+    const lines = data.toString().split('\n').filter(Boolean);
+    for (const line of lines) {
+      mainWindow.webContents.send('pipeline-progress', line);
+    }
+  });
+
+  proc.stderr.on('data', (data) => {
+    mainWindow.webContents.send('pipeline-progress', '[ERR] ' + data.toString().trim());
+  });
+
+  proc.on('close', (code) => {
+    if (code === 0) {
+      const jsonPath = path.join(outputDir, 'assembly.json');
+      mainWindow.webContents.send('pipeline-complete', jsonPath);
+    } else {
+      mainWindow.webContents.send('pipeline-progress', '管线执行失败，退出码: ' + code);
+      mainWindow.webContents.send('pipeline-error', code);
+    }
+  });
+});
+
 // ── Pipeline: Preview STP (mesh + load, no analysis) ────
 
 async function runPreviewPipeline() {
@@ -180,10 +302,10 @@ async function runPreviewPipeline() {
 
   const stpPath = result.filePaths[0];
   const outputDir = path.join(path.dirname(stpPath), 'preview_output');
-  const python = findPython();
+  const { exePath, baseArgs } = findPipelineExe();
 
   const args = [
-    path.join(__dirname, 'pipeline.py'),
+    ...baseArgs,
     stpPath,
     '--output-dir', outputDir,
     '--preview',
@@ -193,8 +315,8 @@ async function runPreviewPipeline() {
   mainWindow.webContents.send('pipeline-mode', 'preview');
   mainWindow.webContents.send('pipeline-started', stpPath);
 
-  const env = Object.assign({}, process.env);
-  const proc = spawn(python, args, { env });
+  const env = buildPipelineEnv();
+  const proc = spawn(exePath, args, { env });
 
   proc.stdout.on('data', (data) => {
     const lines = data.toString().split('\n').filter(Boolean);
@@ -219,6 +341,18 @@ async function runPreviewPipeline() {
 
 // ── Pipeline: Import STP → Generate Disassembly Plan ─────
 
+function findPipelineExe() {
+  if (app.isPackaged) {
+    const exePath = path.join(process.resourcesPath, 'pipeline', 'AutoModel.exe');
+    if (fs.existsSync(exePath)) {
+      return { exePath, baseArgs: [] };
+    }
+  }
+  const python = findPython();
+  const script = path.join(__dirname, 'pipeline.py');
+  return { exePath: python, baseArgs: [script] };
+}
+
 function findPython() {
   const candidates = [
     path.join(process.env.USERPROFILE || '', 'miniconda3', 'envs', 'pyoccenv', 'python.exe'),
@@ -233,6 +367,17 @@ function findPython() {
   return 'python';
 }
 
+function buildPipelineEnv() {
+  const env = { ...process.env };
+  const pyoccBin = path.join(
+    process.env.USERPROFILE || '',
+    'miniconda3', 'envs', 'pyoccenv', 'Library', 'bin');
+  if (fs.existsSync(pyoccBin)) {
+    env.PATH = pyoccBin + ';' + (env.PATH || '');
+  }
+  return env;
+}
+
 async function runImportPipeline() {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: '选择 STP 数模文件',
@@ -243,10 +388,10 @@ async function runImportPipeline() {
 
   const stpPath = result.filePaths[0];
   const outputDir = path.join(path.dirname(stpPath), 'output');
-  const python = findPython();
+  const { exePath, baseArgs } = findPipelineExe();
 
   const args = [
-    path.join(__dirname, 'pipeline.py'),
+    ...baseArgs,
     stpPath,
     '--output-dir', outputDir,
     '--skip-collision',
@@ -256,8 +401,8 @@ async function runImportPipeline() {
   mainWindow.webContents.send('pipeline-mode', 'full');
   mainWindow.webContents.send('pipeline-started', stpPath);
 
-  const env = Object.assign({}, process.env);
-  const proc = spawn(python, args, { env });
+  const env = buildPipelineEnv();
+  const proc = spawn(exePath, args, { env });
 
   proc.stdout.on('data', (data) => {
     const lines = data.toString().split('\n').filter(Boolean);
@@ -293,10 +438,10 @@ async function runValidatePipeline() {
 
   const jsonPath = result.filePaths[0];
   const outputDir = path.dirname(jsonPath);
-  const python = findPython();
+  const { exePath, baseArgs } = findPipelineExe();
 
   const args = [
-    path.join(__dirname, 'pipeline.py'),
+    ...baseArgs,
     jsonPath,
     '--output-dir', outputDir,
     '--validate',
@@ -305,8 +450,8 @@ async function runValidatePipeline() {
   mainWindow.webContents.send('pipeline-progress', '=== 验证拆卸路径 (碰撞检测) ===');
   mainWindow.webContents.send('pipeline-progress', '输入: ' + jsonPath);
 
-  const env = Object.assign({}, process.env);
-  const proc = spawn(python, args, { env });
+  const env = buildPipelineEnv();
+  const proc = spawn(exePath, args, { env });
 
   proc.stdout.on('data', (data) => {
     const lines = data.toString().split('\n').filter(Boolean);
@@ -340,6 +485,11 @@ protocol.registerSchemesAsPrivileged([
 // ── App Lifecycle ─────────────────────────────────────────
 
 app.whenReady().then(() => {
+  // Ensure user bodies directory exists
+  if (!fs.existsSync(getUserBodiesDir())) {
+    fs.mkdirSync(getUserBodiesDir(), { recursive: true });
+  }
+
   // Handle local:// protocol — serves files from disk
   protocol.handle('local', (request) => {
     const filePath = decodeURIComponent(

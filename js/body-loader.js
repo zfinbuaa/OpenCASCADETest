@@ -21,6 +21,31 @@ export class BodyLoader {
     const data = await resp.json();
     this.bodies = data.bodies || [];
     this._modelLoader = modelLoader;
+
+    await this._appendUserBodies();
+  }
+
+  async _appendUserBodies() {
+    if (window.electronAPI) {
+      try {
+        const userBodies = await window.electronAPI.listUserBodies();
+        for (const b of userBodies) this.bodies.push(b);
+      } catch (e) {
+        console.error('Failed to list user bodies:', e);
+      }
+    }
+  }
+
+  async reloadBodies() {
+    this.bodies = [];
+    try {
+      const resp = await fetch('bodies/manifest.json');
+      const data = await resp.json();
+      this.bodies = data.bodies || [];
+    } catch (e) {
+      console.error('Failed to reload body manifest:', e);
+    }
+    await this._appendUserBodies();
   }
 
   /**

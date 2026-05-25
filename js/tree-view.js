@@ -1,127 +1,195 @@
 /**
- * Tree View — 层级零件树，支持点击选择 + 颜色色块 + 阶段徽章。
+ * Tree View — 多级可折叠零件树，支持选择、固定参照、颜色修改。
  */
 
 export class TreeView {
 
-  /**
-   * @param {HTMLElement} container
-   * @param {object} callbacks - { onSelect(id), onColorChange(id, color) }
-   */
   constructor(container, callbacks = {}) {
     this.container = container;
     this.callbacks = callbacks;
-    this.parts = [];
-    this.selected = null;
-    this._colorMap = {};   // partId -> '#rrggbb'
+    this.hierarchy = [];
+    this.partsMap = {};
+    this.stagesMap = {};
+    this.selectedEl = null;
+    this.selectedNodeId = null;
+    this.selectedPartIds = [];
+    this._colorMap = {};
+    this._fixedPartIds = new Set();
+    this._collapsed = new Set();
   }
 
-  /** 获取当前颜色映射 */
-  get colors() { return this._colorMap; }
-
-  /**
-   * @param {Array} parts - from assembly.json
-   * @param {Array} stages - from assembly.json
-   */
-  build(parts, stages = []) {
+  build(hierarchy, parts, stages = []) {
     this.container.innerHTML = '';
-    this.parts = parts;
+    this.hierarchy = hierarchy || [];
 
-    const stageMap = {};
+    this.partsMap = {};
+    if (parts) {
+      for (const p of parts) {
+        this.partsMap[p.id] = p;
+      }
+    }
+
+    this.stagesMap = {};
     if (stages) {
       for (const s of stages) {
         for (const pid of (s.parts || [])) {
-          stageMap[pid] = s.stage;
+          this.stagesMap[pid] = s.stage;
         }
       }
     }
 
-    if (!parts.length) {
+    if (!this.hierarchy.length) {
       const el = document.createElement('div');
-      el.className = 'tree-item';
+      el.className = 'tree-node';
+      el.style.paddingLeft = '12px';
       el.textContent = '(空)';
       this.container.appendChild(el);
       return;
     }
 
-    for (const part of parts) {
-      this._renderItem(part, stageMap);
+    for (const node of this.hierarchy) {
+      this._renderNode(node, this.container, 0);
     }
   }
 
-  _renderItem(part, stageMap) {
-    const el = document.createElement('div');
-    el.className = 'tree-item';
-    el.style.paddingLeft = '12px';
-    el.dataset.partId = part.id;
+  _renderNode(node, parentEl, depth) {
+    const hasChildren = node.children && node.children.length > 0;
+    const isLeaf = !hasChildren && node.partIds && node.partIds.length === 1
+                   && node.id === node.partIds[0];
+    const isFixed = this._isNodeFixed(node);
+    const part = this.partsMap[node.id];
+    const stage = part ? (part.disassemblyStage || this.stagesMap[node.id]) : this.stagesMap[node.id];
+    const isFastener = part ? part.isFastener : false;
 
-    // Icon
-    const icon = document.createElement('span');
-    icon.className = 'icon';
-    icon.textContent = part.isFastener ? '🔩' : '🔧';
-    el.appendChild(icon);
+    const row = document.createElement('div');
+    row.className = 'tree-node';
+    row.style.paddingLeft = (12 + depth * 16) + 'px';
+    row.dataset.nodeId = node.id;
 
-    // Name
+    const arrow = document.createElement('span');
+    arrow.className = 'arrow' + (hasChildren ? '' : ' leaf');
+    if (hasChildren) {
+      arrow.textContent = this._collapsed.has(node.id) ? '▶' : '▼';
+    }
+    row.appendChild(arrow);
+
     const name = document.createElement('span');
     name.className = 'name';
-    name.textContent = part.name || part.id;
-    name.title = part.name || part.id;
-    el.appendChild(name);
+    name.textContent = node.name || node.id;
+    name.title = node.name || node.id;
+    row.appendChild(name);
 
-    // Stage badge
-    const stage = part.disassemblyStage || stageMap[part.id];
-    if (stage) {
-      const badge = document.createElement('span');
-      badge.className = 'badge stage';
-      badge.textContent = 'S' + stage;
-      el.appendChild(badge);
+    const count = node.partIds ? node.partIds.length : 0;
+    if (!isLeaf && count > 0) {
+      const countBadge = document.createElement('span');
+      countBadge.className = 'badge';
+      countBadge.textContent = count;
+      row.appendChild(countBadge);
     }
 
-    // Fastener badge
-    if (part.isFastener) {
-      const badge = document.createElement('span');
-      badge.className = 'badge';
-      badge.textContent = '紧固件';
-      el.appendChild(badge);
+    if (stage && stage > 0) {
+      const stageBadge = document.createElement('span');
+      stageBadge.className = 'badge stage';
+      stageBadge.textContent = 'S' + stage;
+      row.appendChild(stageBadge);
     }
 
-    // Color swatch
-    const swatch = document.createElement('span');
-    swatch.style.cssText = 'width:14px;height:14px;border-radius:3px;margin-left:6px;flex-shrink:0;cursor:pointer;border:1px solid #555';
-    const color = this._colorMap[part.id] || '#808080';
-    swatch.style.backgroundColor = color;
-    swatch.title = '点击修改颜色';
+    if (isFastener) {
+      const fb = document.createElement('span');
+      fb.className = 'badge';
+      fb.textContent = '紧固件';
+      row.appendChild(fb);
+    }
 
-    swatch.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this._showColorPicker(swatch, part.id);
+    if (isFixed) {
+      const fxb = document.createElement('span');
+      fxb.className = 'badge fixed';
+      fxb.textContent = '固定';
+      row.appendChild(fxb);
+    }
+
+    if (isLeaf) {
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+      const color = this._colorMap[node.id] || (part && part.color
+        ? '#' + ((1 << 24) + (Math.round(part.color[0]*255) << 16) + (Math.round(part.color[1]*255) << 8) + Math.round(part.color[2]*255)).toString(16).slice(1)
+        : '#bbbbbb');
+      swatch.style.backgroundColor = color;
+      swatch.title = '点击修改颜色';
+      swatch.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._showColorPicker(swatch, node.id);
+      });
+      row.appendChild(swatch);
+    }
+
+    row.addEventListener('click', (e) => {
+      if (e.target.classList.contains('arrow') && hasChildren) {
+        this._toggleCollapse(node.id, childrenEl, arrow);
+        return;
+      }
+      this._select(row, node);
     });
-    el.appendChild(swatch);
 
-    // Click handler
-    el.addEventListener('click', () => {
-      this._select(el, part);
-    });
+    parentEl.appendChild(row);
 
-    this.container.appendChild(el);
+    const childrenEl = document.createElement('div');
+    childrenEl.className = 'tree-children' + (this._collapsed.has(node.id) ? ' collapsed' : '');
+    if (hasChildren) {
+      for (const child of node.children) {
+        this._renderNode(child, childrenEl, depth + 1);
+      }
+    }
+    parentEl.appendChild(childrenEl);
   }
 
-  _select(el, part) {
-    if (this.selected) {
-      this.selected.classList.remove('selected');
+  _isNodeFixed(node) {
+    if (!node.partIds) return false;
+    for (const pid of node.partIds) {
+      if (this._fixedPartIds.has(pid)) return true;
     }
-    this.selected = el;
+    return false;
+  }
+
+  _toggleCollapse(nodeId, childrenEl, arrow) {
+    if (this._collapsed.has(nodeId)) {
+      this._collapsed.delete(nodeId);
+      childrenEl.classList.remove('collapsed');
+      arrow.textContent = '▼';
+    } else {
+      this._collapsed.add(nodeId);
+      childrenEl.classList.add('collapsed');
+      arrow.textContent = '▶';
+    }
+  }
+
+  _select(el, node) {
+    if (this.selectedEl) {
+      this.selectedEl.classList.remove('selected');
+    }
+    this.selectedEl = el;
+    this.selectedNodeId = node.id;
+    this.selectedPartIds = node.partIds || [];
     el.classList.add('selected');
 
     if (this.callbacks.onSelect) {
-      this.callbacks.onSelect(part.id);
+      this.callbacks.onSelect(node.id, this.selectedPartIds);
     }
+  }
+
+  getSelectedPartIds() {
+    return this.selectedPartIds;
+  }
+
+  setFixedPartIds(ids) {
+    this._fixedPartIds = new Set(ids);
+    this.build(this.hierarchy, Object.values(this.partsMap), []);
   }
 
   _showColorPicker(swatch, partId) {
     const input = document.createElement('input');
     input.type = 'color';
-    input.value = this._colorMap[partId] || '#808080';
+    input.value = this._colorMap[partId] || '#bbbbbb';
     input.style.position = 'fixed';
     input.style.opacity = '0';
     document.body.appendChild(input);
@@ -140,7 +208,6 @@ export class TreeView {
       document.body.removeChild(input);
     });
 
-    // Handle cancel (blur without change)
     input.addEventListener('blur', () => {
       setTimeout(() => {
         if (input.parentNode) document.body.removeChild(input);
@@ -149,6 +216,6 @@ export class TreeView {
   }
 
   getSelected() {
-    return this.selected ? this.selected.dataset.partId : null;
+    return this.selectedNodeId;
   }
 }

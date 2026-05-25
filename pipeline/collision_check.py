@@ -9,7 +9,9 @@ Falls back to the BRep boolean method when mesh data is unavailable.
 """
 
 import sys
+import os
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Cut
 from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Transform
 from OCC.Core.gp import gp_Trsf, gp_Vec
@@ -17,6 +19,8 @@ from OCC.Core.GProp import GProp_GProps
 from OCC.Core.BRepGProp import brepgprop
 from OCC.Core.Bnd import Bnd_Box
 from OCC.Core.BRepBndLib import brepbndlib
+
+from pipeline.direction_calc import CANDIDATE_DIRS
 
 
 def _shape_to_mesh_arrays(shape, linear_deflection=1.0):
@@ -226,7 +230,8 @@ class MeshCollisionData:
 
 
 def prepare_collision_data(parts, linear_deflection=1.0):
-    """Pre-compute mesh and AABB data for all parts."""
+    """Pre-compute mesh and AABB data for all parts in world space."""
+    from pipeline.gltf_exporter import _apply_transform
     data = {}
     n = len(parts)
     for idx, part in enumerate(parts):
@@ -234,7 +239,12 @@ def prepare_collision_data(parts, linear_deflection=1.0):
         if n > 10 and (idx % 10 == 0 or idx == n - 1):
             sys.stdout.write("\r  meshing for collision: {}/{}...".format(idx + 1, n))
             sys.stdout.flush()
-        data[name] = MeshCollisionData(part["shape"], linear_deflection)
+        cd = MeshCollisionData(part["shape"], linear_deflection)
+        if cd.vertices is not None and part.get("transform"):
+            cd.vertices = _apply_transform(cd.vertices, part["transform"])
+            cd.aabb_min, cd.aabb_max = _compute_aabb_np(cd.vertices)
+            cd.tree = _build_aabb_tree(cd.vertices, cd.triangles)
+        data[name] = cd
     if n > 10:
         sys.stdout.write("\n")
         sys.stdout.flush()
@@ -441,14 +451,12 @@ def find_best_feasible_direction(part_name, part_shape, obstacle_shapes,
     """
     Search for a feasible disassembly direction for a part.
 
-    Tries directions in priority order:
-    1. preferred_dir
-    2. 26 candidate directions sorted by dot(preferred, candidate)
+    Checks all 26 candidate directions in parallel via ThreadPoolExecutor
+    (mesh operations are thread-safe). Returns the first feasible direction
+    found, or the one with the largest safe_distance if none feasible.
 
     Returns:
         tuple: (best_direction, check_result)
-            best_direction: [x, y, z]
-            check_result: dict from check_disassembly_path
     """
     preferred = np.array(preferred_dir, dtype=np.float64)
     pnorm = np.linalg.norm(preferred)
@@ -466,19 +474,47 @@ def find_best_feasible_direction(part_name, part_shape, obstacle_shapes,
     best_result = None
     best_dir = None
     best_safe = -1.0
+    feasible_found = False
+    feasible_dir = None
+    feasible_result = None
 
-    for _, direction in sorted_candidates:
-        result = check_disassembly_path(
-            part_name, part_shape, obstacle_shapes, direction,
-            max_distance, steps=20, collision_data=collision_data)
+    n_workers = min(max(1, (os.cpu_count() or 4)), 16)
 
-        if result["feasible"]:
-            return direction, result
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+        futures = {}
+        for _, direction in sorted_candidates:
+            future = ex.submit(
+                check_disassembly_path,
+                part_name, part_shape, obstacle_shapes, direction,
+                max_distance, 20, collision_data)
+            futures[future] = direction
 
-        if result["max_safe_distance"] > best_safe:
-            best_safe = result["max_safe_distance"]
-            best_result = result
-            best_dir = direction
+        for future in as_completed(futures):
+            if feasible_found:
+                future.cancel()
+                continue
+
+            direction = futures[future]
+            try:
+                result = future.result(timeout=300)
+            except Exception:
+                continue
+
+            if result.get("feasible", False):
+                feasible_found = True
+                feasible_dir = direction
+                feasible_result = result
+                for f in futures:
+                    f.cancel()
+                break
+
+            if result.get("max_safe_distance", -1) > best_safe:
+                best_safe = result["max_safe_distance"]
+                best_result = result
+                best_dir = direction
+
+    if feasible_found:
+        return feasible_dir, feasible_result
 
     if best_dir is None:
         best_dir = preferred_dir
@@ -491,6 +527,97 @@ def find_best_feasible_direction(part_name, part_shape, obstacle_shapes,
         }
 
     return best_dir, best_result
+
+
+def _collect_leaf_descendants(sa_name, sub_assemblies, part_map, result_set,
+                              memo=None):
+    """Recursively collect all leaf part names under a sub-assembly."""
+    if memo is not None:
+        if sa_name in memo:
+            if memo[sa_name] is not None:
+                result_set.update(memo[sa_name])
+            return
+        memo[sa_name] = None
+
+    sa_leaves = set()
+    for sa in sub_assemblies:
+        if sa["name"] == sa_name:
+            for child in sa.get("child_names", []):
+                if child in part_map:
+                    sa_leaves.add(child)
+                else:
+                    child_set = set()
+                    _collect_leaf_descendants(child, sub_assemblies,
+                                              part_map, child_set, memo)
+                    sa_leaves.update(child_set)
+            break
+    if memo is not None:
+        memo[sa_name] = sa_leaves
+    result_set.update(sa_leaves)
+
+
+def filter_obstacles_by_compound_bbox(part_name, part_shape, remaining_names,
+                                      part_map, sub_assemblies, collision_data,
+                                      max_distance=500.0):
+    """Filter obstacles using Compound-level Bnd_Box to exclude far-away groups.
+
+    For each sub-assembly, merge AABBs of all descendant leaf parts into a
+    compound-level bounding box. A compound whose AABB does not overlap the
+    target part's expanded AABB can have all its leaf parts skipped,
+    dramatically reducing the obstacle count for collision checking.
+    """
+    if not sub_assemblies or len(remaining_names) < 50:
+        return [(n, part_map[n]["shape"]) for n in remaining_names if n != part_name]
+
+    part_data = collision_data.get(part_name)
+    if part_data is None or part_data.aabb_min is None:
+        return [(n, part_map[n]["shape"]) for n in remaining_names if n != part_name]
+
+    expanded_min = part_data.aabb_min - max_distance
+    expanded_max = part_data.aabb_max + max_distance
+
+    memo = {}
+    sa_leaves = {}
+    all_known = set()
+    sa_bbox = {}
+
+    for sa in sub_assemblies:
+        sa_name = sa["name"]
+        leaves = set()
+        _collect_leaf_descendants(sa_name, sub_assemblies, part_map,
+                                  leaves, memo)
+        sa_leaves[sa_name] = leaves
+        all_known.update(leaves)
+
+        bmin = None
+        bmax = None
+        for leaf_name in leaves:
+            cd = collision_data.get(leaf_name)
+            if cd is not None and cd.aabb_min is not None:
+                if bmin is None:
+                    bmin = cd.aabb_min.copy()
+                    bmax = cd.aabb_max.copy()
+                else:
+                    bmin = np.minimum(bmin, cd.aabb_min)
+                    bmax = np.maximum(bmax, cd.aabb_max)
+        if bmin is not None:
+            sa_bbox[sa_name] = (bmin, bmax)
+
+    if not sa_bbox:
+        return [(n, part_map[n]["shape"]) for n in remaining_names if n != part_name]
+
+    remaining_set = set(remaining_names)
+    remaining_set.discard(part_name)
+
+    filtered = set()
+    for sa_name, (bmin, bmax) in sa_bbox.items():
+        if _aabb_overlap_np(expanded_min, expanded_max, bmin, bmax):
+            filtered.update(remaining_set & sa_leaves.get(sa_name, set()))
+
+    for n in remaining_set - all_known:
+        filtered.add(n)
+
+    return [(n, part_map[n]["shape"]) for n in filtered]
 
 
 def check_obstacle_set(part_shape, obstacle_set, direction,

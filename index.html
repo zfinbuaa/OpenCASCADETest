@@ -2,8 +2,8 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://unpkg.com blob: file:;">
-<title>整车数模自动拆装方案系统</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: file:;">
+<title>数模自动拆装工具</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, 'Microsoft YaHei', sans-serif; overflow: hidden; height: 100vh; }
@@ -86,6 +86,21 @@
 
   select.sel { margin: 4px 12px; padding: 4px 8px; border-radius: 3px; border: 1px solid #444;
     background: #0d1b33; color: #ccc; font-size: 12px; width: calc(100% - 24px); }
+
+  /* Tree view */
+  .tree-node { display: flex; align-items: center; padding: 2px 4px; cursor: pointer;
+    font-size: 11px; transition: background 0.1s; border-radius: 2px; }
+  .tree-node:hover { background: rgba(255,255,255,0.05); }
+  .tree-node.selected { background: rgba(30,144,255,0.25); }
+  .tree-node .arrow { width: 14px; text-align: center; flex-shrink: 0; cursor: pointer;
+    user-select: none; font-size: 9px; }
+  .tree-node .arrow.leaf { visibility: hidden; }
+  .tree-node .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tree-node .swatch { width:14px;height:14px;border-radius:3px;margin-left:6px;flex-shrink:0;
+    cursor:pointer;border:1px solid #555; }
+  .tree-children { margin-left: 0; }
+  .tree-children.collapsed { display: none; }
+  .tree-node .badge.fixed { background: #e67e22; color: #fff; }
 </style>
 </head>
 <body>
@@ -114,8 +129,8 @@
 <script type="importmap">
 {
   "imports": {
-    "three": "https://unpkg.com/three@0.157.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.157.0/examples/jsm/"
+    "three": "./node_modules/three/build/three.module.js",
+    "three/addons/": "./node_modules/three/examples/jsm/"
   }
 }
 </script>

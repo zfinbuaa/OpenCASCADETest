@@ -22,6 +22,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Check if file exists. Returns bool. */
   fileExists: (filePath) => ipcRenderer.invoke('file-exists', filePath),
 
+  // ── Body shells ────────────────────────────────────────
+
+  /** List user-added car body models. Returns [{ name, glb }]. */
+  listUserBodies: () => ipcRenderer.invoke('list-user-bodies'),
+
+  /** Import a new body shell from STP → converts to .glb. */
+  importBody: () => ipcRenderer.invoke('import-body'),
+
+  /** Run pipeline scoped to a specific sub-assembly node. */
+  runPipelineForNode: (rootNode) => ipcRenderer.invoke('run-pipeline-for-node', rootNode),
+
   // ── Pipeline ──────────────────────────────────────────
 
   /** Listen for pipeline stdout progress lines. */

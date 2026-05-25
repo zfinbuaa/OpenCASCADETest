@@ -2,15 +2,53 @@
 Assembly JSON output generator.
 
 Produces the assembly.json file that the Three.js frontend consumes.
-Contains part list, groups, and disassembly stages.
+Contains part list, hierarchy tree, groups, and disassembly stages.
 """
 
 import json
 
 
+def build_hierarchy(roots):
+    """
+    Build a hierarchical tree structure from extract_assembly_tree() output.
+
+    Each node contains: id, name, children, partIds (leaf part IDs under this node).
+
+    Args:
+        roots: list of root nodes from extract_assembly_tree().
+
+    Returns:
+        list[dict]: Hierarchy tree for frontend tree view.
+    """
+    result = []
+    for root in roots:
+        result.append(_build_hierarchy_node(root))
+    return result
+
+
+def _build_hierarchy_node(node):
+    """Recursively convert an assembly tree node to a hierarchy JSON node."""
+    children = [_build_hierarchy_node(c) for c in node.get("children", [])]
+
+    part_ids = []
+    if node.get("is_leaf"):
+        pid = node.get("name", "").replace(" ", "_")
+        if pid:
+            part_ids.append(pid)
+    for c in children:
+        part_ids.extend(c.get("partIds", []))
+
+    return {
+        "id": node.get("name", "").replace(" ", "_"),
+        "name": node.get("name", ""),
+        "children": children,
+        "partIds": part_ids,
+    }
+
+
 def build_assembly_json(parts, stages, source_file, contacts=None,
                         fasteners=None, verified_directions=None,
-                        distance_multipliers=None):
+                        distance_multipliers=None, roots=None):
     """
     Build the assembly.json data structure.
 
@@ -22,6 +60,7 @@ def build_assembly_json(parts, stages, source_file, contacts=None,
         fasteners: (optional) list of fastener names.
         verified_directions: (optional) dict of name -> [x,y,z] verified dirs.
         distance_multipliers: (optional) dict of name -> float multipliers.
+        roots: (optional) assembly tree from extract_assembly_tree() for hierarchy.
 
     Returns:
         dict: assembly.json compatible structure.
@@ -33,7 +72,6 @@ def build_assembly_json(parts, stages, source_file, contacts=None,
     if distance_multipliers is None:
         distance_multipliers = {}
 
-    # Part entries
     part_entries = []
     part_index = {}
     for idx, part in enumerate(parts):
@@ -41,17 +79,14 @@ def build_assembly_json(parts, stages, source_file, contacts=None,
         part_entries.append(entry)
         part_index[part["name"]] = entry
 
-    # Assign stage numbers
     stage_by_part = {}
     for stage_idx, stage_parts in enumerate(stages):
         for name in stage_parts:
             stage_by_part[name] = stage_idx + 1
 
-    # Update stage numbers in part entries
     for entry in part_entries:
         entry["disassemblyStage"] = stage_by_part.get(entry["name"], 0)
 
-    # Mark fasteners
     for entry in part_entries:
         entry["isFastener"] = entry["name"] in fasteners
         if entry["name"] in verified_directions:
@@ -59,7 +94,6 @@ def build_assembly_json(parts, stages, source_file, contacts=None,
         if entry["name"] in distance_multipliers:
             entry["distanceMultiplier"] = distance_multipliers[entry["name"]]
 
-    # Build groups (parts without explicit groups are solo groups)
     groups = []
     for entry in part_entries:
         groups.append({
@@ -69,7 +103,6 @@ def build_assembly_json(parts, stages, source_file, contacts=None,
             "stage": entry["disassemblyStage"],
         })
 
-    # Stage descriptions
     stage_descriptions = []
     for stage_idx, stage_parts in enumerate(stages):
         desc = "Stage {}".format(stage_idx + 1)
@@ -84,10 +117,13 @@ def build_assembly_json(parts, stages, source_file, contacts=None,
             "parts": stage_parts,
         })
 
+    hierarchy = build_hierarchy(roots) if roots else []
+
     result = {
         "name": source_file.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].replace(".stp", "").replace(".step", ""),
         "sourceFile": source_file,
         "parts": part_entries,
+        "hierarchy": hierarchy,
         "groups": groups,
         "stages": stage_descriptions,
         "stats": {

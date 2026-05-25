@@ -44,31 +44,32 @@ def _compute_centroid(shape):
 
 def build_disassembly_dag_v2(parts, directions, collision_data,
                               fasteners, max_distance=500.0,
-                              assembly_centroid=None):
+                              assembly_centroid=None, sub_assemblies=None):
     """
-    Collision-driven disassembly plan generation.
+    Collision-driven disassembly plan generation — item-by-item removal.
 
-    For each part, tries to find a feasible removal direction by actually
-    checking collisions against remaining parts. Directions can be
-    corrected if the initial guess is blocked.
+    Parts are removed one at a time (outermost first). Once a part is
+    confirmed removable, it is immediately excluded from the obstacle set
+    for subsequent parts, avoiding false-positive collisions within the
+    same stage.
+
+    Uses Compound-level Bnd_Box filtering to skip far-away obstacles.
 
     Args:
-        parts: list of part dicts with 'name' and 'shape'.
+        parts: list of part dicts with 'name', 'shape', 'parent'.
         directions: dict of name -> [x,y,z] initial direction guesses.
         collision_data: dict from prepare_collision_data().
         fasteners: list of fastener part names.
         max_distance: movement distance for collision check (mm).
         assembly_centroid: ndarray(3) assembly center point.
+        sub_assemblies: list of sub-assembly dicts from flatten_assembly_tree.
 
     Returns:
         tuple: (stages, verified_directions, distance_multipliers, details)
-            stages: list[list[str]] - stage -> part names
-            verified_directions: dict[str, list[float]] - name -> direction
-            distance_multipliers: dict[str, float] - name -> multiplier
-            details: list[dict] - per-part verification results
     """
     from pipeline.collision_check import (
-        check_disassembly_path, find_best_feasible_direction
+        check_disassembly_path, find_best_feasible_direction,
+        filter_obstacles_by_compound_bbox
     )
 
     part_map = {p["name"]: p for p in parts}
@@ -139,7 +140,7 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
             len(stage1)))
         sys.stdout.flush()
 
-    # ── Stage 2+: Outer-to-inner greedy BFS ─────────────────
+    # ── Stage 2+: Item-by-item removal (outermost first) ──
     stage_num = 2
     max_stages = len(part_names)
 
@@ -148,21 +149,28 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
                                   key=lambda n: distances_to_center.get(n, 0),
                                   reverse=True)
 
-        sys.stdout.write("  Stage {}: checking {} remaining parts...\n".format(
-            stage_num, len(sorted_remaining)))
+        sys.stdout.write("  Stage {}: checking {} remaining parts "
+                         "(item-by-item)...\n".format(
+                             stage_num, len(sorted_remaining)))
         sys.stdout.flush()
 
         current_stage = []
         stage_details = []
+        deferred = []
         best_deferred = None
         best_deferred_safe = -1.0
         best_deferred_dir = None
 
         checked = 0
         for name in sorted_remaining:
+            if name not in remaining:
+                continue
             part = part_map[name]
-            obstacles = [(n, part_map[n]["shape"])
-                         for n in remaining if n != name]
+
+            obstacles = filter_obstacles_by_compound_bbox(
+                name, part["shape"], list(remaining),
+                part_map, sub_assemblies, collision_data,
+                max_distance)
 
             result = check_disassembly_path(
                 name, part["shape"], obstacles, verified_dirs[name],
@@ -172,6 +180,7 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
 
             if result["feasible"]:
                 current_stage.append(name)
+                remaining.discard(name)
                 stage_details.append({
                     "part": name, "stage": stage_num, "feasible": True,
                     "direction": verified_dirs[name],
@@ -185,17 +194,18 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
                 if best_result["feasible"]:
                     verified_dirs[name] = best_dir
                     current_stage.append(name)
+                    remaining.discard(name)
                     stage_details.append({
                         "part": name, "stage": stage_num, "feasible": True,
                         "direction": best_dir,
                         "safe_distance": best_result["max_safe_distance"],
                     })
                 else:
+                    deferred.append(name)
                     if best_result["max_safe_distance"] > best_deferred_safe:
                         best_deferred_safe = best_result["max_safe_distance"]
                         best_deferred = name
                         best_deferred_dir = best_dir
-
                     stage_details.append({
                         "part": name, "stage": stage_num, "feasible": False,
                         "direction": best_dir,
@@ -205,25 +215,28 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
 
             if checked % 10 == 0:
                 sys.stdout.write(
-                    "\r    checked {}/{} ({} feasible so far)".format(
-                        checked, len(sorted_remaining), len(current_stage)))
+                    "\r    checked {}/{} ({} feasible, {} deferred)".format(
+                        checked, len(sorted_remaining),
+                        len(current_stage), len(deferred)))
                 sys.stdout.flush()
 
+        # ── Deadlock resolution: force-remove the best-deferred part ──
         if not current_stage and best_deferred is not None:
-            verified_dirs[best_deferred] = best_deferred_dir
-            current_stage.append(best_deferred)
-            for d in stage_details:
-                if d["part"] == best_deferred:
-                    d["feasible"] = False
-                    d["direction"] = best_deferred_dir
-                    d["note"] = "force-removed"
-                    break
+            if best_deferred in remaining:
+                verified_dirs[best_deferred] = best_deferred_dir
+                current_stage.append(best_deferred)
+                remaining.discard(best_deferred)
+                for d in stage_details:
+                    if d["part"] == best_deferred:
+                        d["feasible"] = False
+                        d["direction"] = best_deferred_dir
+                        d["note"] = "force-removed"
+                        break
 
         if current_stage:
             for name in current_stage:
                 distance_multipliers[name] = stage_num
             stages.append(current_stage)
-            remaining -= set(current_stage)
             details.extend(stage_details)
 
             sys.stdout.write(

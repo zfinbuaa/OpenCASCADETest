@@ -1,10 +1,10 @@
 /**
  * Scene Manager — Three.js scene setup, lighting, camera, orbit controls,
- * resize handling, and background.
+ * resize handling, background, and standard view presets.
  */
 
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OrbitControls } from './three-addons/controls/OrbitControls.js';
 
 export class SceneManager {
 
@@ -28,7 +28,7 @@ export class SceneManager {
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(options.backgroundColor || 0xe8ecf0);
+    this.scene.background = new THREE.Color(options.backgroundColor || 0xffffff);
 
     this.camera = new THREE.PerspectiveCamera(
       45,
@@ -45,6 +45,9 @@ export class SceneManager {
     this.controls.target.set(0, 500, 0);
     this.controls.update();
 
+    this._sceneCenter = new THREE.Vector3(0, 0, 0);
+    this._sceneRadius = 1000;
+
     this._setupLights();
 
     this._onResize = this._handleResize.bind(this);
@@ -55,18 +58,18 @@ export class SceneManager {
   }
 
   _setupLights() {
-    const ambient = new THREE.AmbientLight(0x606060, 3);
+    const ambient = new THREE.AmbientLight(0xffffff, 2.0);
     this.scene.add(ambient);
 
-    const key = new THREE.DirectionalLight(0xffffff, 4);
-    key.position.set(3000, 4000, 2000);
+    const key = new THREE.DirectionalLight(0xffffff, 3.0);
+    key.position.set(1, 1, 1);
     this.scene.add(key);
 
-    const fill = new THREE.DirectionalLight(0x8090c0, 1.5);
-    fill.position.set(-2000, 1000, -2000);
+    const fill = new THREE.DirectionalLight(0xffffff, 1.5);
+    fill.position.set(-1, 0.5, -1);
     this.scene.add(fill);
 
-    const hemi = new THREE.HemisphereLight(0x606080, 0x303040, 1.5);
+    const hemi = new THREE.HemisphereLight(0xffffff, 0xe8e8e8, 0.8);
     this.scene.add(hemi);
   }
 
@@ -90,12 +93,34 @@ export class SceneManager {
     this.controls.update();
   }
 
-  focusOn(center, size = 500) {
+  focusOn(center, diagonal = 2000) {
+    this._sceneCenter.copy(center);
+    this._sceneRadius = diagonal / 2;
     this.controls.target.copy(center);
-    const offset = new THREE.Vector3(size, size * 0.7, size);
-    this.camera.position.copy(center).add(offset);
+    const fov = this.camera.fov * Math.PI / 180;
+    const dist = this._sceneRadius / Math.tan(fov / 2) * 0.9;
+    const dir = new THREE.Vector3(1, 0.7, 1).normalize();
+    this.camera.position.copy(center).add(dir.multiplyScalar(dist));
     this.controls.update();
   }
+
+  _viewFromDirection(dx, dy, dz) {
+    const fov = this.camera.fov * Math.PI / 180;
+    const dist = this._sceneRadius / Math.tan(fov / 2) * 0.9;
+    const dir = new THREE.Vector3(dx, dy, dz).normalize();
+    this.camera.position.copy(this._sceneCenter).add(dir.multiplyScalar(dist));
+    this.controls.target.copy(this._sceneCenter);
+    this.camera.up.set(0, 1, 0);
+    this.controls.update();
+  }
+
+  viewFront()  { this._viewFromDirection(0, 0, 1); }
+  viewBack()   { this._viewFromDirection(0, 0, -1); }
+  viewLeft()   { this._viewFromDirection(-1, 0, 0); }
+  viewRight()  { this._viewFromDirection(1, 0, 0); }
+  viewTop()    { this._viewFromDirection(0, 1, 0.001); }
+  viewBottom() { this._viewFromDirection(0, -1, 0.001); }
+  viewIsometric() { this._viewFromDirection(1, 0.7, 1); }
 
   getSceneCenter() {
     const box = new THREE.Box3();

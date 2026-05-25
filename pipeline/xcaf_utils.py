@@ -18,6 +18,8 @@ from OCC.Core.TDF import TDF_LabelSequence
 from OCC.Core.TDataStd import TDataStd_Name
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.BRepGProp import brepgprop
+from OCC.Core.TopAbs import TopAbs_COMPOUND, TopAbs_SOLID
+from OCC.Core.TopExp import TopExp_Explorer
 
 try:
     from OCC.Core.XCAFDoc import XCAFDoc_ColorSurf
@@ -123,12 +125,22 @@ def extract_assembly_tree(doc):
         current_path = ancestor_path + [name]
 
         has_children = shape_tool.IsAssembly(label)
-        is_leaf = not has_children
+        shape = shape_tool.GetShape(label)
+
+        is_compound = (not has_children and shape is not None
+                       and shape.ShapeType() == TopAbs_COMPOUND)
+
+        if has_children:
+            is_leaf = False
+        elif is_compound:
+            is_leaf = False
+        else:
+            is_leaf = True
 
         node = {
             "label": label,
             "name": name,
-            "shape": shape_tool.GetShape(label) if is_leaf else None,
+            "shape": shape if is_leaf else None,
             "children": [],
             "color": None,
             "transform": None,
@@ -152,6 +164,28 @@ def extract_assembly_tree(doc):
                 child["transform"] = loc_to_matrix(child_loc)
                 node["children"].append(child)
                 node["child_names"].append(child["name"])
+        elif is_compound:
+            solid_idx = 0
+            exp = TopExp_Explorer(shape, TopAbs_SOLID)
+            while exp.More():
+                solid = exp.Current()
+                solid_name = "{}_S{:03d}".format(name, solid_idx + 1)
+                child = {
+                    "label": None,
+                    "name": solid_name,
+                    "shape": solid,
+                    "children": [],
+                    "color": node.get("color"),
+                    "transform": None,
+                    "depth": depth + 1,
+                    "is_leaf": True,
+                    "child_names": [],
+                    "ancestor_path": current_path + [solid_name],
+                }
+                node["children"].append(child)
+                node["child_names"].append(solid_name)
+                solid_idx += 1
+                exp.Next()
 
         return node
 
@@ -160,18 +194,32 @@ def extract_assembly_tree(doc):
 
     roots = []
     for i in range(free_shapes.Length()):
-        roots.append(traverse(free_shapes.Value(i + 1)))
+        root_label = free_shapes.Value(i + 1)
+        root = traverse(root_label)
+        root["transform"] = loc_to_matrix(shape_tool.GetLocation(root_label))
+        roots.append(root)
 
     return roots
+
+
+def _multiply_transforms(parent_col, child_col):
+    """Multiply two column-major 4x4 transforms: parent @ child."""
+    if parent_col is None:
+        return child_col
+    if child_col is None:
+        return parent_col
+    p = np.array(parent_col, dtype=np.float64).reshape(4, 4, order='F')
+    c = np.array(child_col, dtype=np.float64).reshape(4, 4, order='F')
+    return (p @ c).flatten(order='F').tolist()
 
 
 def flatten_assembly_tree(roots):
     """
     Flatten an assembly tree into leaf parts and sub-assembly nodes.
 
-    Leaf parts retain their direct parent (nearest sub-assembly) and
-    full ancestor path. Sub-assembly nodes are returned separately
-    with their child names and centroids.
+    Leaf parts receive the accumulated world-space transform (product of
+    all ancestor local-to-parent matrices) so GLB export places them
+    correctly in world coordinates.
 
     Returns:
         tuple: (leaf_parts, sub_assemblies)
@@ -183,12 +231,16 @@ def flatten_assembly_tree(roots):
     leaf_parts = []
     sub_assemblies = []
 
-    def traverse(node, parent_name=None, ancestor_path=None):
+    def traverse(node, parent_name=None, ancestor_path=None,
+                 parent_transform=None):
         if ancestor_path is None:
             ancestor_path = []
 
         name = node["name"]
         current_path = ancestor_path + [name]
+
+        world_transform = _multiply_transforms(
+            parent_transform, node.get("transform"))
 
         if node.get("is_leaf", False):
             direct_parent = parent_name if parent_name else name
@@ -196,7 +248,7 @@ def flatten_assembly_tree(roots):
                 "name": name,
                 "shape": node.get("shape"),
                 "color": node.get("color"),
-                "transform": node.get("transform"),
+                "transform": world_transform,
                 "parent": direct_parent,
                 "ancestors": current_path,
             }
@@ -216,10 +268,7 @@ def flatten_assembly_tree(roots):
             sub_assemblies.append(sa)
 
         for child in node.get("children", []):
-            if node.get("is_leaf", False):
-                traverse(child, name, current_path)
-            else:
-                traverse(child, name, current_path)
+            traverse(child, name, current_path, world_transform)
 
     for root in roots:
         traverse(root)
@@ -234,6 +283,17 @@ def flatten_assembly_tree(roots):
         })
 
     return leaf_parts, sub_assemblies
+
+
+def filter_parts_by_ancestor(parts, root_name):
+    """Keep only leaf parts whose ancestor path includes root_name.
+
+    Used to generate disassembly plans scoped to a specific sub-assembly
+    level selected by the user.
+    """
+    if not root_name:
+        return parts
+    return [p for p in parts if root_name in p.get("ancestors", [])]
 
 
 def get_tree_stats(roots):

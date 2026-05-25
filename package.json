@@ -1,16 +1,59 @@
 {
   "name": "disassembly-viewer",
   "version": "2.0.0",
-  "description": "整车三维数模自动拆装方案生成系统",
+  "description": "数模自动拆装工具",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dev": "electron . --dev"
+    "dev": "electron . --dev",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.automodel.disassembly",
+    "productName": "数模自动拆装工具",
+    "executableName": "AutoModel",
+    "directories": {
+      "output": "release"
+    },
+    "extraResources": [
+      {
+        "from": "dist/AutoModel",
+        "to": "pipeline"
+      }
+    ],
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "js/**/*",
+      "bodies/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": null
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerSidebar": null,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   },
   "dependencies": {
-    "electron": "^35.0.0"
+    "three": "^0.157.0"
   },
-  "devDependencies": {},
-  "keywords": ["CAD", "OCCT", "Three.js", "disassembly"],
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.8.1"
+  },
+  "author": "AutoModel",
+  "keywords": [
+    "CAD",
+    "OCCT",
+    "Three.js",
+    "disassembly"
+  ],
   "license": "LGPL-3.0"
 }

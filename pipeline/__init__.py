@@ -4,7 +4,7 @@
 from .stp_reader import read_stp, read_stp_with_doc, verify_doc
 from .mesher import brep_to_mesh, get_mesh_stats
 from .xcaf_utils import extract_assembly_tree, flatten_assembly_tree, get_tree_stats
-from .gltf_exporter import export_single_glb, export_assembly_to_glb, export_assembly_indexed
+from .gltf_exporter import export_merged_glb, export_assembly_indexed
 
 # Phase 1: Assembly analysis
 from .contact_detector import detect_contacts, get_contact_graph

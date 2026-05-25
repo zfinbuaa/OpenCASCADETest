@@ -83,10 +83,15 @@ def _compute_part_volume(shape):
 
 
 def _compute_centroids(parts):
-    """Compute centroids for all parts. Returns dict: name -> ndarray(3)."""
+    """Compute world-space centroids for all parts. Returns dict: name -> ndarray(3)."""
     centroids = {}
     for p in parts:
-        centroids[p["name"]] = _compute_part_centroid(p["shape"])
+        c = _compute_part_centroid(p["shape"])
+        if c is not None and p.get("transform"):
+            mat = np.array(p["transform"], dtype=np.float64).reshape(4, 4, order='F')
+            c_h = np.array([c[0], c[1], c[2], 1.0], dtype=np.float64)
+            c = (mat @ c_h)[:3]
+        centroids[p["name"]] = c
     return centroids
 
 
@@ -247,12 +252,59 @@ def calc_disassembly_direction(part_name, parts, centroids=None,
     return _project_to_candidates(outward_hat)
 
 
-def compute_all_directions(parts, sub_assemblies=None):
+def _default_direction(part_name, parts, centroids, sub_assemblies=None):
+    """Default direction for a part with no contacts (free part).
+
+    If the part has a parent sub-assembly, direction is along the line
+    from the parent's centroid to the part's centroid. Otherwise +Y.
+    """
+    part_c = centroids.get(part_name)
+    if part_c is None:
+        return [0.0, 1.0, 0.0]
+
+    parent_name = None
+    for p in parts:
+        if p["name"] == part_name:
+            parent_name = p.get("parent")
+            break
+
+    if parent_name and sub_assemblies:
+        for sa in sub_assemblies:
+            if sa["name"] == parent_name:
+                sa_centroid = sa.get("centroid")
+                if sa_centroid is not None:
+                    sa_c = np.array(sa_centroid)
+                else:
+                    sibling_centroids = []
+                    for p in parts:
+                        if p.get("parent") == parent_name and p["name"] != part_name:
+                            c = centroids.get(p["name"])
+                            if c is not None:
+                                sibling_centroids.append(c)
+                    if sibling_centroids:
+                        sa_c = np.mean(sibling_centroids, axis=0)
+                    else:
+                        sa_c = None
+                if sa_c is not None:
+                    direction = part_c - sa_c
+                    norm = np.linalg.norm(direction)
+                    if norm > 1e-10:
+                        return _project_to_candidates(direction / norm)
+                break
+
+    return [0.0, 1.0, 0.0]
+
+
+def compute_all_directions(parts, contacts=None, sub_assemblies=None):
     """
     Compute disassembly directions for all parts using centroid-outward method.
 
+    Parts with zero contacts are given a default direction (parent centroid
+    to part centroid), skipping expensive sibling repulsion computation.
+
     Args:
         parts: list of part dicts with 'name', 'shape', 'parent'.
+        contacts: optional list of contact dicts (used to identify free parts).
         sub_assemblies: optional list of sub-assembly dicts.
 
     Returns:
@@ -261,10 +313,20 @@ def compute_all_directions(parts, sub_assemblies=None):
     centroids = _compute_centroids(parts)
     assembly_centroid = _compute_assembly_centroid(parts, centroids)
 
+    contact_parts = set()
+    if contacts:
+        for c in contacts:
+            contact_parts.add(c.get("partA", ""))
+            contact_parts.add(c.get("partB", ""))
+
     directions = {}
     for part in parts:
         name = part["name"]
-        directions[name] = calc_disassembly_direction(
-            name, parts, centroids, assembly_centroid, sub_assemblies)
+        if contacts and name not in contact_parts:
+            directions[name] = _default_direction(
+                name, parts, centroids, sub_assemblies)
+        else:
+            directions[name] = calc_disassembly_direction(
+                name, parts, centroids, assembly_centroid, sub_assemblies)
 
     return directions
