@@ -5,11 +5,17 @@ Converts OpenCASCADE B-Rep shapes to indexed triangle meshes
 with per-vertex normals for use in glTF export and visualization.
 """
 
+import logging
+
 from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
 from OCC.Core.TopExp import TopExp_Explorer
-from OCC.Core.TopAbs import TopAbs_FACE
+from OCC.Core.TopAbs import TopAbs_FACE, TopAbs_REVERSED
 from OCC.Core.BRep import BRep_Tool
 from OCC.Core.TopLoc import TopLoc_Location
+
+from pipeline._occ_lock import OCC_BREP_LOCK
+
+logger = logging.getLogger(__name__)
 
 
 def brep_to_mesh(shape, linear_deflection=1.0, angular_deflection=0.5):
@@ -26,9 +32,12 @@ def brep_to_mesh(shape, linear_deflection=1.0, angular_deflection=0.5):
             vertices: flat list [x0,y0,z0, x1,y1,z1, ...]
             triangles: list of [i0,i1,i2] index triplets
             normals: flat list [nx,ny,nz, ...] per triangle (NOT per vertex)
+                     Honors TopAbs_REVERSED face orientation so normals
+                     point outward consistently.
     """
-    mesh = BRepMesh_IncrementalMesh(shape, linear_deflection, False, angular_deflection)
-    mesh.Perform()
+    with OCC_BREP_LOCK:
+        mesh = BRepMesh_IncrementalMesh(shape, linear_deflection, False, angular_deflection)
+        mesh.Perform()
 
     vertices = []
     triangles = []
@@ -37,6 +46,8 @@ def brep_to_mesh(shape, linear_deflection=1.0, angular_deflection=0.5):
     exp = TopExp_Explorer(shape, TopAbs_FACE)
     while exp.More():
         face = exp.Current()
+        # Honor face orientation: REVERSED means geometric normal should be flipped
+        face_reversed = (face.Orientation() == TopAbs_REVERSED)
         loc = TopLoc_Location()
         triangulation = BRep_Tool.Triangulation(face, loc)
 
@@ -82,6 +93,9 @@ def brep_to_mesh(shape, linear_deflection=1.0, angular_deflection=0.5):
             nx = uy * wz - uz * wy
             ny = uz * wx - ux * wz
             nz = ux * wy - uy * wx
+            # Flip normal if face is reversed, so outward-pointing
+            if face_reversed:
+                nx, ny, nz = -nx, -ny, -nz
             length = (nx * nx + ny * ny + nz * nz) ** 0.5
             if length > 1e-12:
                 normals.extend([nx / length, ny / length, nz / length])
@@ -96,6 +110,16 @@ def brep_to_mesh(shape, linear_deflection=1.0, angular_deflection=0.5):
 def get_mesh_stats(vertices, triangles, normals):
     """Return summary statistics for a mesh."""
     from numpy import array
+
+    if not vertices:
+        return {
+            "vertex_count": 0,
+            "triangle_count": 0,
+            "normal_count": 0,
+            "bbox_min": [0.0, 0.0, 0.0],
+            "bbox_max": [0.0, 0.0, 0.0],
+            "center": [0.0, 0.0, 0.0],
+        }
 
     v = array(vertices).reshape(-1, 3)
     bbox_min = v.min(axis=0).tolist()

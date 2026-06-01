@@ -1,5 +1,20 @@
 # Pipeline package - OCCT STEP → glTF + assembly.json
 
+_cancel_check = None
+
+
+def set_cancel_check(fn):
+    """Register a cancellation check callable (returns True if cancelled)."""
+    global _cancel_check
+    _cancel_check = fn
+
+
+def is_cancelled():
+    """Check if the pipeline has been cancelled."""
+    if _cancel_check is not None:
+        return _cancel_check()
+    return False
+
 # Phase 0: Data I/O
 from .stp_reader import read_stp, read_stp_with_doc, verify_doc
 from .mesher import brep_to_mesh, get_mesh_stats

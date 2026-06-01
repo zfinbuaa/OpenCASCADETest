@@ -18,8 +18,21 @@ import os
 import sys
 import json
 import time
+import signal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+_cancelled = False
+
+
+def _signal_handler(signum, frame):
+    global _cancelled
+    _cancelled = True
+    log("CANCEL: received signal {}, setting cancellation flag".format(signum))
+
+
+def is_cancelled():
+    return _cancelled
 
 
 def log(msg):
@@ -28,6 +41,18 @@ def log(msg):
 
 
 def main():
+    try:
+        signal.signal(signal.SIGINT, _signal_handler)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, _signal_handler)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, _signal_handler)
+    except (ValueError, OSError):
+        pass
+
+    import pipeline as _pipeline_pkg
+    _pipeline_pkg.set_cancel_check(is_cancelled)
+
     parser = argparse.ArgumentParser(
         description="整车数模自动拆装方案生成管线"
     )
@@ -44,9 +69,22 @@ def main():
                         help="将 STP 转换为单个车壳 .glb（不拆分零件）")
     parser.add_argument("--root-node", default=None,
                         help="仅处理指定子装配节点下的零件（层级选择）")
+    parser.add_argument("--bom", default=None,
+                        help="BOM Excel (.xlsx) 文件路径，启用多文件加载模式")
+    parser.add_argument("--models-dir", default=None,
+                        help="BOM 模式下 STP 文件所在目录（默认同 BOM 文件目录）")
+    parser.add_argument("--target-part", default=None,
+                        help="仅计算指定零件的拆卸依赖链（依赖链模式）")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # ── BOM mode: multi-file loading from Excel BOM ──
+    if args.bom:
+        if args.preview:
+            return _run_bom_preview(args)
+        else:
+            return _run_bom_full(args)
 
     # ── Body export mode: STP → single .glb body shell ──
     if args.export_body:
@@ -80,11 +118,14 @@ def main():
     t0 = time.time()
     doc = read_stp_with_doc(args.input)
     log("  Read in {:.1f}s".format(time.time() - t0))
-    summary = verify_doc(doc)
+    summary = verify_doc(doc, filepath=args.input)
     log("  Root shapes: {}".format(summary["root_count"]))
     if not summary["valid"]:
         log("ERROR: No valid shapes found")
         return 1
+    unit_scale = summary.get("unit_scale_to_mm", 1.0)
+    if unit_scale != 1.0:
+        log("  WARNING: STEP file unit scale = {} (not mm); values are in file units, not mm".format(unit_scale))
 
     # Step 2
     log("[2/8] Extracting assembly tree...")
@@ -222,10 +263,13 @@ def _run_preview(args):
     t0 = time.time()
     doc = read_stp_with_doc(args.input)
     log("  Read in {:.1f}s".format(time.time() - t0))
-    summary = verify_doc(doc)
+    summary = verify_doc(doc, filepath=args.input)
     if not summary["valid"]:
         log("ERROR: No valid shapes found")
         return 1
+    unit_scale = summary.get("unit_scale_to_mm", 1.0)
+    if unit_scale != 1.0:
+        log("  WARNING: STEP file unit scale = {} (not mm)".format(unit_scale))
 
     log("[2/3] Extracting assembly tree...")
     t0 = time.time()
@@ -281,8 +325,14 @@ def _run_validate(args):
     log("  Read in {:.1f}s".format(time.time() - t0))
 
     roots = extract_assembly_tree(doc)
-    parts = flatten_assembly_tree(roots)
+    parts, _sub_assemblies = flatten_assembly_tree(roots)
     log("  {} parts extracted".format(len(parts)))
+
+    # Also try looking for sourceFile adjacent to the JSON
+    if not source_file or not os.path.exists(source_file):
+        adj = os.path.join(os.path.dirname(json_path), os.path.basename(source_file))
+        if os.path.exists(adj):
+            source_file = adj
 
     # Map assembly.json stage data to loaded parts
     stage_map = {}
@@ -384,6 +434,344 @@ def _run_body_export(args):
     else:
         log("  ERROR: Failed to mesh body")
         return 1
+    return 0
+
+
+def _run_bom_preview(args):
+    """BOM preview mode: read BOM, mesh+glb each STP, combine into one assembly.json.
+    No contact detection or DAG — fast preview for position map."""
+    from pipeline.bom_loader import read_bom, validate_bom_entries
+    from pipeline.stp_reader import read_stp_with_doc, verify_doc
+    from pipeline.xcaf_utils import (extract_assembly_tree, flatten_assembly_tree,
+                                     find_sub_assembly_by_code_and_name)
+    from pipeline.gltf_exporter import export_assembly_indexed
+    from pipeline.assembly_json import build_assembly_json, write_assembly_json
+
+    parts_dir = os.path.join(args.output_dir, "parts")
+    os.makedirs(parts_dir, exist_ok=True)
+
+    t_total = time.time()
+
+    log("[1/2] Reading BOM: {}".format(args.bom))
+    entries = read_bom(args.bom, args.models_dir)
+    _models_dir = args.models_dir or os.path.dirname(os.path.abspath(args.bom))
+    valid_entries, missing, report = validate_bom_entries(entries, _models_dir)
+    for line in report:
+        log(line)
+    if not valid_entries:
+        log("ERROR: No valid BOM entries with existing STP files")
+        return 1
+
+    all_parts = []
+    all_roots = []
+    skipped_count = 0
+
+    for i, entry in enumerate(valid_entries):
+        code = entry["code"]
+        target_name = entry["target_name"]
+        stp_path = entry["stp_path"]
+        bom_info = {"name": target_name or code, "code": code}
+        log("  [{}/{}] Processing: {} ({})".format(
+            i + 1, len(valid_entries), target_name or "(unnamed)", code))
+
+        t0 = time.time()
+        doc = read_stp_with_doc(stp_path)
+        summary = verify_doc(doc, filepath=stp_path)
+        if not summary["valid"]:
+            log("    WARNING: no valid shapes, skipping")
+            skipped_count += 1
+            continue
+
+        roots = extract_assembly_tree(doc)
+        all_sub_parts, sub_assemblies = flatten_assembly_tree(roots)
+
+        if target_name:
+            matched_names, matched_node = find_sub_assembly_by_code_and_name(
+                roots, code, target_name)
+            if matched_names:
+                sub_parts = [p for p in all_sub_parts if p["name"] in matched_names]
+                log("    matched '{}' → {} leaf parts".format(
+                    matched_node, len(sub_parts)))
+            else:
+                log("    WARNING: no node matched pattern '^{}-.*-{}$'".format(
+                    code, target_name))
+                log("    loading ALL {} parts from STP".format(len(all_sub_parts)))
+                sub_parts = all_sub_parts
+        else:
+            sub_parts = all_sub_parts
+
+        for p in sub_parts:
+            p["name"] = "{}_{:04d}__{}".format(code, i, p["name"])
+            p["bomSource"] = bom_info
+            p["bomCode"] = code
+            p["bomRowIndex"] = i
+
+        sub_parts = export_assembly_indexed(
+            sub_parts, parts_dir,
+            linear_deflection=args.mesh_deflection)
+
+        for p in sub_parts:
+            if "bomSource" not in p:
+                p["bomSource"] = bom_info
+            if not p["name"].startswith(code + "_"):
+                p["name"] = "{}_{:04d}__{}".format(code, i, p["name"].split("__", 1)[-1] if "__" in p["name"] else p["name"])
+
+        all_parts.extend(sub_parts)
+        all_roots.extend(roots)
+
+        log("    {} parts ({:.1f}s)".format(len(sub_parts), time.time() - t0))
+
+    if not all_parts:
+        log("ERROR: No parts loaded from any BOM entry")
+        return 1
+
+    # Verify uniqueness
+    names = [p["name"] for p in all_parts]
+    if len(names) != len(set(names)):
+        dupes = [n for n in names if names.count(n) > 1]
+        log("WARNING: duplicate part names after BOM prefix: {}".format(
+            list(set(dupes))[:5]))
+
+    assembly = build_assembly_json(all_parts, [], args.bom, roots=all_roots)
+    json_path = os.path.join(args.output_dir, "assembly.json")
+    write_assembly_json(assembly, json_path)
+    log("  assembly.json ({:.1f} KB)".format(
+        os.path.getsize(json_path) / 1024))
+
+    log("BOM preview done in {:.1f}s. {} parts total, {} BOM entries skipped.".format(
+        time.time() - t_total, len(all_parts), skipped_count))
+    return 0
+
+
+def _run_bom_full(args):
+    """BOM full mode: read BOM, mesh+glb, detect contacts, build DAG,
+    output full disassembly plan. Optionally scoped to --target-part."""
+    from pipeline.bom_loader import read_bom, validate_bom_entries
+    from pipeline.stp_reader import read_stp_with_doc, verify_doc
+    from pipeline.xcaf_utils import (extract_assembly_tree, flatten_assembly_tree,
+                                     find_sub_assembly_by_code_and_name)
+    from pipeline.gltf_exporter import export_assembly_indexed
+    from pipeline.contact_detector import detect_contacts
+    from pipeline.fastener_identifier import identify_fasteners
+    from pipeline.dag_builder import build_disassembly_dag_v2
+    from pipeline.direction_calc import compute_all_directions, _compute_assembly_centroid, _compute_centroids
+    from pipeline.assembly_json import build_assembly_json, write_assembly_json
+    from pipeline.collision_check import prepare_collision_data
+
+    parts_dir = os.path.join(args.output_dir, "parts")
+    os.makedirs(parts_dir, exist_ok=True)
+
+    t_total = time.time()
+
+    log("[1/7] Reading BOM: {}".format(args.bom))
+    entries = read_bom(args.bom, args.models_dir)
+    _models_dir = args.models_dir or os.path.dirname(os.path.abspath(args.bom))
+    valid_entries, missing, report = validate_bom_entries(entries, _models_dir)
+    for line in report:
+        log(line)
+    if not valid_entries:
+        log("ERROR: No valid BOM entries with existing STP files")
+        return 1
+
+    all_parts = []
+    all_roots = []
+    skipped_count = 0
+
+    for i, entry in enumerate(valid_entries):
+        code = entry["code"]
+        target_name = entry["target_name"]
+        stp_path = entry["stp_path"]
+        bom_info = {"name": target_name or code, "code": code}
+        log("  [{}/{}] Processing: {} ({})".format(
+            i + 1, len(valid_entries), target_name or "(unnamed)", code))
+
+        t0 = time.time()
+        doc = read_stp_with_doc(stp_path)
+        summary = verify_doc(doc, filepath=stp_path)
+        if not summary["valid"]:
+            log("    WARNING: no valid shapes, skipping")
+            skipped_count += 1
+            continue
+
+        roots = extract_assembly_tree(doc)
+        all_sub_parts, sub_assemblies = flatten_assembly_tree(roots)
+
+        if target_name:
+            matched_names, matched_node = find_sub_assembly_by_code_and_name(
+                roots, code, target_name)
+            if matched_names:
+                sub_parts = [p for p in all_sub_parts if p["name"] in matched_names]
+                log("    matched '{}' → {} leaf parts".format(
+                    matched_node, len(sub_parts)))
+            else:
+                log("    WARNING: no node matched pattern '^{}-.*-{}$'".format(
+                    code, target_name))
+                log("    loading ALL {} parts from STP".format(len(all_sub_parts)))
+                sub_parts = all_sub_parts
+        else:
+            sub_parts = all_sub_parts
+
+        for p in sub_parts:
+            p["name"] = "{}_{:04d}__{}".format(code, i, p["name"])
+            p["bomSource"] = bom_info
+            p["bomCode"] = code
+            p["bomRowIndex"] = i
+
+        sub_parts = export_assembly_indexed(
+            sub_parts, parts_dir,
+            linear_deflection=args.mesh_deflection)
+
+        for p in sub_parts:
+            if "bomSource" not in p:
+                p["bomSource"] = bom_info
+            if not p["name"].startswith(code + "_"):
+                p["name"] = "{}_{:04d}__{}".format(code, i, p["name"].split("__", 1)[-1] if "__" in p["name"] else p["name"])
+
+        all_parts.extend(sub_parts)
+        all_roots.extend(roots)
+
+        log("    {} parts ({:.1f}s)".format(len(sub_parts), time.time() - t0))
+
+    if not all_parts:
+        log("ERROR: No parts loaded from any BOM entry")
+        return 1
+
+    # Verify uniqueness
+    names = [p["name"] for p in all_parts]
+    if len(names) != len(set(names)):
+        dupes = [n for n in names if names.count(n) > 1]
+        log("WARNING: duplicate part names after BOM prefix: {}".format(
+            list(set(dupes))[:5]))
+
+    log("  Total: {} parts".format(len(all_parts)))
+
+    # Pre-compute collision data
+    log("  Pre-computing mesh collision data...")
+    t_mesh = time.time()
+    collision_data = prepare_collision_data(all_parts)
+    log("  {} meshes ready ({:.1f}s)".format(
+        len(collision_data), time.time() - t_mesh))
+
+    flat_parts, sub_assemblies = list(all_parts), []
+    for p in all_parts:
+        # Force parent to BOM name to ensure contact detection groups by BOM
+        p["parent"] = p.get("bomSource", {}).get("name", "root")
+
+    # Rebuild sub_assemblies from BOM entries
+    bom_groups = {}
+    for p in all_parts:
+        bs = p.get("bomSource", {})
+        key = bs.get("name", "unknown")
+        if key not in bom_groups:
+            bom_groups[key] = {
+                "name": key,
+                "child_names": [],
+                "depth": 0,
+                "centroid": None,
+                "ancestor_path": [key],
+            }
+        bom_groups[key]["child_names"].append(p["name"])
+    sub_assemblies = list(bom_groups.values())
+
+    # Step: Contact detection
+    log("[4/7] Detecting contacts...")
+    t0 = time.time()
+    contacts = detect_contacts(flat_parts, intra_parent_only=True,
+                               collision_data=collision_data, parallel=True)
+    log("  {} contact pairs ({:.1f}s)".format(len(contacts), time.time() - t0))
+
+    # Fastener identification
+    fasteners = identify_fasteners(flat_parts, contacts)
+    if fasteners:
+        log("  {} fasteners: {}".format(len(fasteners), ", ".join(fasteners[:10])))
+    else:
+        log("  No fasteners identified")
+
+    # Compute directions
+    log("[5/7] Computing outward directions...")
+    t0 = time.time()
+    directions = compute_all_directions(flat_parts, contacts, sub_assemblies)
+    for part in flat_parts:
+        part["direction"] = directions.get(part["name"], [0, 1, 0])
+    log("  {} directions computed ({:.1f}s)".format(
+        len(directions), time.time() - t0))
+
+    centroids = _compute_centroids(flat_parts)
+    assembly_centroid = _compute_assembly_centroid(flat_parts, centroids)
+
+    if args.target_part:
+        from pipeline.dependency_chain import compute_dependency_chain
+        log("[6/7] Computing dependency chain for target: {}".format(
+            args.target_part))
+        t0 = time.time()
+        stages, verified_dirs, dist_mults, details = compute_dependency_chain(
+            flat_parts, directions, collision_data, args.target_part,
+            max_distance=args.explosion_distance,
+            assembly_centroid=assembly_centroid,
+            sub_assemblies=sub_assemblies)
+        log("  {} stages in dependency chain ({:.1f}s)".format(
+            len(stages), time.time() - t0))
+    else:
+        log("[6/7] Building collision-driven disassembly plan...")
+        t0 = time.time()
+        stages, verified_dirs, dist_mults, details = build_disassembly_dag_v2(
+            flat_parts, directions, collision_data, fasteners,
+            max_distance=args.explosion_distance,
+            assembly_centroid=assembly_centroid,
+            sub_assemblies=sub_assemblies)
+
+        feasible = sum(1 for d in details if d.get("feasible"))
+        blocked = len(details) - feasible
+        log("  {} stages, {}/{} parts feasible ({:.1f}s)".format(
+            len(stages), feasible, len(details), time.time() - t0))
+
+    for part in flat_parts:
+        name = part["name"]
+        if name in verified_dirs:
+            part["direction"] = verified_dirs[name]
+
+    # Write report
+    report_lines = []
+    report_lines.append("=" * 60)
+    report_lines.append("Disassembly Plan Report")
+    report_lines.append("=" * 60)
+    report_lines.append("Total parts: {}".format(len(details)))
+    feasible = sum(1 for d in details if d.get("feasible"))
+    blocked = len(details) - feasible
+    report_lines.append("Feasible:    {}".format(feasible))
+    report_lines.append("Blocked:     {}".format(blocked))
+    report_lines.append("Stages:      {}".format(len(stages)))
+    report_lines.append("-" * 60)
+    for d in details:
+        status = "OK" if d.get("feasible") else "BLOCKED"
+        line = "  [{}] Stage {:2d} | {:20s} | dir=[{}] | safe: {:.1f}mm".format(
+            status, d.get("stage", 0), d.get("part", ""),
+            ",".join("{:.1f}".format(x) for x in d.get("direction", [0, 0, 0])),
+            d.get("safe_distance", 0))
+        if not d.get("feasible") and d.get("collision_with"):
+            line += " | collision: {}".format(d["collision_with"])
+        report_lines.append(line)
+    report_lines.append("-" * 60)
+    report = "\n".join(report_lines)
+    report_path = os.path.join(args.output_dir, "report.txt")
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(report)
+    log(report)
+
+    log("[7/7] Writing assembly.json...")
+    t0 = time.time()
+    assembly = build_assembly_json(
+        flat_parts, stages, args.bom, contacts, fasteners,
+        verified_directions=verified_dirs,
+        distance_multipliers=dist_mults,
+        roots=all_roots)
+    json_path = os.path.join(args.output_dir, "assembly.json")
+    write_assembly_json(assembly, json_path)
+    log("  {} ({:.1f} KB, {:.1f}s)".format(
+        json_path, os.path.getsize(json_path) / 1024, time.time() - t0))
+
+    log("Done in {:.1f}s. Output: {}".format(
+        time.time() - t_total, args.output_dir))
     return 0
 
 

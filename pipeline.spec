@@ -9,7 +9,7 @@ block_cipher = None
 
 # ── Patch PyInstaller to skip broken subprocess calls ──────
 import PyInstaller.building.build_main as _bm
-_bm.discover_hook_directories = lambda: []
+# _bm.discover_hook_directories = lambda: []  # uncommented to restore hook auto-discovery
 
 _orig_find = _bm.find_binary_dependencies
 def _safe_find_binary_dependencies(*args, **kwargs):
@@ -57,7 +57,33 @@ a = Analysis(
         'pipeline.path_searcher',
         'pipeline.path_validator',
         'pipeline.assembly_json',
+        'pipeline.bom_loader',
+        'pipeline.dependency_chain',
         'numpy',
+        'openpyxl',
+        'OCC',
+        'OCC.Core',
+        'OCC.Extend',
+        'OCC.Core.Bnd',
+        'OCC.Core.BRep',
+        'OCC.Core.BRepAlgoAPI',
+        'OCC.Core.BRepBndLib',
+        'OCC.Core.BRepBuilderAPI',
+        'OCC.Core.BRepGProp',
+        'OCC.Core.BRepMesh',
+        'OCC.Core.gp',
+        'OCC.Core.GProp',
+        'OCC.Core.STEPCAFControl',
+        'OCC.Core.TDataStd',
+        'OCC.Core.TDF',
+        'OCC.Core.TDocStd',
+        'OCC.Core.TopAbs',
+        'OCC.Core.TopExp',
+        'OCC.Core.TopoDS',
+        'OCC.Core.TopLoc',
+        'OCC.Core.XCAFApp',
+        'OCC.Core.XCAFDoc',
+        'OCC.Extend.DataExchange',
     ],
     hookspath=[''],
     hooksconfig={},

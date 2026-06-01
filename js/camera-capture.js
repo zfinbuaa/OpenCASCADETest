@@ -4,7 +4,7 @@
  * Renders the scene from multiple preset viewpoints for documentation.
  */
 
-import * as THREE from 'three';
+import * as THREE from '../node_modules/three/build/three.module.js';
 
 export class CameraCapture {
 

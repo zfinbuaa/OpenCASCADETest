@@ -1,5 +1,5 @@
 /**
- * Tree View — 多级可折叠零件树，支持选择、固定参照、颜色修改。
+ * Tree View — 多级可折叠零件树，支持选择、固定参照、颜色修改、层级勾选。
  */
 
 export class TreeView {
@@ -16,6 +16,10 @@ export class TreeView {
     this._colorMap = {};
     this._fixedPartIds = new Set();
     this._collapsed = new Set();
+    this._lastCheckedNodeId = null;
+    this._checkedPartIds = new Set();
+    this._hiddenPartIds = new Set();
+    this._nodeIdToPartIds = new Map();
   }
 
   build(hierarchy, parts, stages = []) {
@@ -38,6 +42,8 @@ export class TreeView {
       }
     }
 
+    this._buildNodeIndex();
+
     if (!this.hierarchy.length) {
       const el = document.createElement('div');
       el.className = 'tree-node';
@@ -50,6 +56,19 @@ export class TreeView {
     for (const node of this.hierarchy) {
       this._renderNode(node, this.container, 0);
     }
+    // Sync checkbox tri-state on initial render
+    this._refreshCheckboxes();
+  }
+
+  _buildNodeIndex() {
+    this._nodeIdToPartIds = new Map();
+    const visit = (node) => {
+      const ids = new Set();
+      this._collectPartIds(node, ids);
+      this._nodeIdToPartIds.set(node.id, ids);
+      for (const c of node.children || []) visit(c);
+    };
+    for (const r of this.hierarchy) visit(r);
   }
 
   _renderNode(node, parentEl, depth) {
@@ -60,11 +79,22 @@ export class TreeView {
     const part = this.partsMap[node.id];
     const stage = part ? (part.disassemblyStage || this.stagesMap[node.id]) : this.stagesMap[node.id];
     const isFastener = part ? part.isFastener : false;
+    const nodePartIds = node.partIds || [];
 
     const row = document.createElement('div');
     row.className = 'tree-node';
     row.style.paddingLeft = (12 + depth * 16) + 'px';
     row.dataset.nodeId = node.id;
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'tree-check';
+    // Tri-state will be set by _refreshCheckboxes after full render
+    checkbox.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._toggleCheck(node);
+    });
+    row.appendChild(checkbox);
 
     const arrow = document.createElement('span');
     arrow.className = 'arrow' + (hasChildren ? '' : ' leaf');
@@ -79,7 +109,18 @@ export class TreeView {
     name.title = node.name || node.id;
     row.appendChild(name);
 
-    const count = node.partIds ? node.partIds.length : 0;
+    const eye = document.createElement('span');
+    eye.className = 'eye-icon';
+    const isHidden = this._isNodeHidden(node);
+    eye.textContent = isHidden ? '◌' : '●';
+    eye.title = isHidden ? '点击显示' : '点击隐藏';
+    eye.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._toggleVisibility(node, eye);
+    });
+    row.appendChild(eye);
+
+    const count = nodePartIds.length;
     if (!isLeaf && count > 0) {
       const countBadge = document.createElement('span');
       countBadge.className = 'badge';
@@ -123,17 +164,20 @@ export class TreeView {
       row.appendChild(swatch);
     }
 
+    const childrenEl = document.createElement('div');
+
     row.addEventListener('click', (e) => {
       if (e.target.classList.contains('arrow') && hasChildren) {
         this._toggleCollapse(node.id, childrenEl, arrow);
         return;
       }
+      if (e.target.tagName === 'INPUT') return;
+      if (e.target.classList.contains('eye-icon')) return;
       this._select(row, node);
     });
 
     parentEl.appendChild(row);
 
-    const childrenEl = document.createElement('div');
     childrenEl.className = 'tree-children' + (this._collapsed.has(node.id) ? ' collapsed' : '');
     if (hasChildren) {
       for (const child of node.children) {
@@ -141,6 +185,90 @@ export class TreeView {
       }
     }
     parentEl.appendChild(childrenEl);
+  }
+
+  _toggleCheck(node) {
+    const nodePartIds = this._nodeIdToPartIds.get(node.id)
+      || (() => { const s = new Set(); this._collectPartIds(node, s); return s; })();
+
+    // Tri-state semantics: if all children currently checked, uncheck them all;
+    // otherwise, check them all (accumulating with existing selections).
+    let allChecked = nodePartIds.size > 0;
+    for (const pid of nodePartIds) {
+      if (!this._checkedPartIds.has(pid)) { allChecked = false; break; }
+    }
+
+    if (allChecked) {
+      for (const pid of nodePartIds) this._checkedPartIds.delete(pid);
+      this._lastCheckedNodeId = null;
+    } else {
+      for (const pid of nodePartIds) this._checkedPartIds.add(pid);
+      this._lastCheckedNodeId = node.id;
+    }
+    this._refreshCheckboxes();
+    if (this.callbacks.onCheckChange) {
+      this.callbacks.onCheckChange(this._lastCheckedNodeId, this._checkedPartIds);
+    }
+  }
+
+  _collectPartIds(node, outSet) {
+    if (node.partIds) {
+      for (const pid of node.partIds) {
+        outSet.add(pid);
+      }
+    }
+    if (node.children) {
+      for (const child of node.children) {
+        this._collectPartIds(child, outSet);
+      }
+    }
+  }
+
+  _refreshCheckboxes() {
+    const checkboxes = this.container.querySelectorAll('.tree-check');
+    for (const cb of checkboxes) {
+      const row = cb.parentNode;
+      const nodeId = row.dataset.nodeId;
+      const nodePartIds = this._nodeIdToPartIds.get(nodeId);
+      if (!nodePartIds || nodePartIds.size === 0) {
+        cb.checked = false;
+        cb.indeterminate = false;
+        continue;
+      }
+      let checked = 0;
+      for (const pid of nodePartIds) {
+        if (this._checkedPartIds.has(pid)) checked++;
+      }
+      if (checked === 0) {
+        cb.checked = false;
+        cb.indeterminate = false;
+      } else if (checked === nodePartIds.size) {
+        cb.checked = true;
+        cb.indeterminate = false;
+      } else {
+        cb.checked = false;
+        cb.indeterminate = true;
+      }
+    }
+  }
+
+  getCheckedPartIds() {
+    return this._checkedPartIds;
+  }
+
+  getCheckedNodeId() {
+    // For backward compatibility: returns the most recently checked node ID,
+    // or null if nothing is currently checked or last action was uncheck.
+    return this._lastCheckedNodeId;
+  }
+
+  clearChecked() {
+    this._checkedPartIds = new Set();
+    this._lastCheckedNodeId = null;
+    this._refreshCheckboxes();
+    if (this.callbacks.onCheckChange) {
+      this.callbacks.onCheckChange(null, this._checkedPartIds);
+    }
   }
 
   _isNodeFixed(node) {
@@ -217,5 +345,85 @@ export class TreeView {
 
   getSelected() {
     return this.selectedNodeId;
+  }
+
+  _isNodeHidden(node) {
+    if (!node.partIds) return false;
+    return node.partIds.some(pid => this._hiddenPartIds.has(pid));
+  }
+
+  _toggleVisibility(node, eyeEl) {
+    const wasHidden = this._isNodeHidden(node);
+    if (node.partIds) {
+      if (wasHidden) {
+        for (const pid of node.partIds) this._hiddenPartIds.delete(pid);
+      } else {
+        for (const pid of node.partIds) this._hiddenPartIds.add(pid);
+      }
+    }
+    if (eyeEl) {
+      eyeEl.textContent = wasHidden ? '●' : '◌';
+      eyeEl.title = wasHidden ? '点击隐藏' : '点击显示';
+    }
+    if (this.callbacks.onVisibilityChange) {
+      this.callbacks.onVisibilityChange(node.id, node.partIds || [], !wasHidden);
+    }
+  }
+
+  getHiddenPartIds() {
+    return new Set(this._hiddenPartIds);
+  }
+
+  setHiddenPartIds(ids) {
+    this._hiddenPartIds = new Set(ids);
+    this.build(this.hierarchy, Object.values(this.partsMap), []);
+  }
+
+  setAllVisible() {
+    this._hiddenPartIds.clear();
+    this.build(this.hierarchy, Object.values(this.partsMap), []);
+    if (this.callbacks.onVisibilityChange) {
+      this.callbacks.onVisibilityChange(null, [], true);
+    }
+  }
+
+  setAllHidden() {
+    for (const node of this.hierarchy) {
+      this._collectPartIds(node, this._hiddenPartIds);
+    }
+    this.build(this.hierarchy, Object.values(this.partsMap), []);
+    if (this.callbacks.onVisibilityChange) {
+      this.callbacks.onVisibilityChange(null, [], false);
+    }
+  }
+
+  showOnlySelected() {
+    if (!this.selectedNodeId) return;
+    this._hiddenPartIds.clear();
+    for (const node of this.hierarchy) {
+      this._collectAllPartIds(node, this._hiddenPartIds);
+    }
+    if (this.selectedPartIds) {
+      for (const pid of this.selectedPartIds) {
+        this._hiddenPartIds.delete(pid);
+      }
+    }
+    this.build(this.hierarchy, Object.values(this.partsMap), []);
+    if (this.callbacks.onVisibilityChange) {
+      this.callbacks.onVisibilityChange(this.selectedNodeId, this.selectedPartIds || [], true);
+    }
+  }
+
+  _collectAllPartIds(node, outSet) {
+    if (node.partIds) {
+      for (const pid of node.partIds) {
+        outSet.add(pid);
+      }
+    }
+    if (node.children) {
+      for (const child of node.children) {
+        this._collectAllPartIds(child, outSet);
+      }
+    }
   }
 }

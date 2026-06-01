@@ -58,7 +58,7 @@ def identify_fasteners(parts, contacts, volume_ratio_threshold=0.005):
         total_volume += vol
 
     vol_list = sorted(volumes.values())
-    median_vol = vol_list[len(vol_list) // 2] if vol_list else 1.0
+    median_vol = float(np.median(vol_list)) if vol_list else 1.0
     absolute_cap = median_vol * 0.05
 
     contact_count = {}

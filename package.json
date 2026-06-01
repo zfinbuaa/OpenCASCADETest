@@ -14,7 +14,7 @@
     "productName": "数模自动拆装工具",
     "executableName": "AutoModel",
     "directories": {
-      "output": "release"
+      "output": "release_new"
     },
     "extraResources": [
       {

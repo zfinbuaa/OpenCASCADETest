@@ -5,7 +5,7 @@
  * 三个 Tab 共享同一份模型数据（shared），各自维护独立的爆炸/树状态。
  */
 
-import * as THREE from 'three';
+import * as THREE from '../node_modules/three/build/three.module.js';
 import { ModelLoader } from './model-loader.js';
 import { SceneManager } from './scene-manager.js';
 import { ExplosionView } from './explosion-view.js';
@@ -45,20 +45,24 @@ const shared = {
   fixedPartIds: new Set(),
   hierarchy: null,
   selectedNode: null,
+  sourceStpPath: null,
+  checkedPartIds: new Set(),
+  hiddenPartIds: new Set(),
+  bomEntries: [],
+  bomSourcePath: null,
+  bomModelsDir: null,
 };
 
 // ── Per-tab state ─────────────────────────────────────────
 const tabs = [
-  { explo: null, tree: null },
-  { explo: null, tree: null },
-  { explo: null, tree: null },
+  { mode: 'position', tree: null },
+  { mode: 'explosion', tree: null },
+  { mode: 'sequence', tree: null },
 ];
 
-tabs.forEach((t, i) => {
-  t.explo = new ExplosionView(sm.scene, sm.camera, sm.renderer.domElement, sm.controls);
-  t.explo.onStatus((msg) => { if (activeTab === i) statusBar.textContent = msg; });
-  t.explo.onClearHighlight = () => { _clearHighlight(); statusBar.textContent = '就绪'; };
-});
+const sharedExplo = new ExplosionView(sm.scene, sm.camera, sm.renderer.domElement, sm.controls);
+sharedExplo.onStatus((msg) => { statusBar.textContent = msg; });
+sharedExplo.onClearHighlight = () => { _clearHighlight(); statusBar.textContent = '就绪'; };
 
 // ── Tab Switching ────────────────────────────────────────
 tabBtns.forEach((btn) => {
@@ -68,9 +72,9 @@ tabBtns.forEach((btn) => {
 function switchTab(idx) {
   if (idx === activeTab) return;
 
-  const prev = tabs[activeTab];
-  prev.explo.disableManualMode();
-  prev.explo.hideThrustLines();
+  sharedExplo.restoreAll();
+  sharedExplo.disableManualMode();
+  sharedExplo.hideThrustLines();
 
   activeTab = idx;
   tabBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
@@ -92,8 +96,85 @@ function renderPanel(idx) {
   }
 }
 
+function _renderBomList() {
+  const container = document.getElementById('bom-list');
+  if (!container) return;
+  container.innerHTML = '';
+
+  if (!shared.assembly || !shared.assembly.parts) {
+    container.textContent = '(无数据)';
+    return;
+  }
+
+  const bomMap = new Map();
+  for (const part of shared.assembly.parts) {
+    if (part.bomSource) {
+      const key = part.bomSource.code || part.bomSource.name;
+      if (!bomMap.has(key)) {
+        bomMap.set(key, {
+          name: part.bomSource.name || key,
+          code: part.bomSource.code || '',
+          partIds: [],
+        });
+      }
+      bomMap.get(key).partIds.push(part.id);
+    }
+  }
+
+  if (bomMap.size === 0) {
+    container.textContent = '(非BOM加载)';
+    return;
+  }
+
+  for (const [key, info] of bomMap) {
+    const totalParts = info.partIds.length;
+    const visible = info.partIds.filter(id => !shared.hiddenPartIds.has(id)).length;
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;padding:2px 0;cursor:pointer;';
+    row.title = info.name + ' (' + visible + '/' + totalParts + ' 可见)';
+
+    const eye = document.createElement('span');
+    eye.style.cssText = 'width:16px;text-align:center;font-size:10px;color:' + (visible > 0 ? '#1e90ff' : '#555') + ';';
+    eye.textContent = visible > 0 ? '●' : '◌';
+
+    const name = document.createElement('span');
+    name.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:4px;';
+    name.textContent = info.name || info.code;
+
+    const badge = document.createElement('span');
+    badge.style.cssText = 'font-size:9px;padding:1px 4px;border-radius:2px;background:#333;color:#aaa;margin-left:4px;';
+    badge.textContent = visible + '/' + totalParts;
+
+    row.appendChild(eye);
+    row.appendChild(name);
+    row.appendChild(badge);
+
+    row.addEventListener('click', () => {
+      const wasVisible = visible > 0;
+      if (wasVisible) {
+        for (const pid of info.partIds) shared.hiddenPartIds.add(pid);
+      } else {
+        for (const pid of info.partIds) shared.hiddenPartIds.delete(pid);
+      }
+      _applyVisibilityToScene();
+      for (const t of tabs) { if (t.tree) t.tree.setHiddenPartIds(shared.hiddenPartIds); }
+      _renderBomList();
+      statusBar.textContent = wasVisible
+        ? '已隐藏: ' + info.name
+        : '已显示: ' + info.name;
+    });
+
+    container.appendChild(row);
+  }
+}
+
 function renderPositionPanel() {
   let h = '';
+  h += '<div class="section-title">数据加载</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-pri" id="btn-load-bom">加载 BOM (多文件)</button>';
+  h += '<button class="btn btn-outline" id="btn-load-assembly">加载 JSON</button>';
+  h += '</div>';
   h += '<div class="section-title">车壳选择</div>';
   h += '<select class="sel" id="sel-body">';
   for (const b of bodyLoader.bodies) {
@@ -103,8 +184,14 @@ function renderPositionPanel() {
   h += '<div class="btn-group">';
   h += '<button class="btn btn-outline" id="btn-import-body">导入新壳</button>';
   h += '</div>';
-  h += '<div class="section-title">目标部件</div>';
-  h += '<div class="btn-group"><button class="btn btn-pri" id="btn-load">加载装配数据</button></div>';
+  h += '<div class="section-title">可见性</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-show-all">全部显示</button>';
+  h += '<button class="btn btn-outline" id="btn-hide-all">全部隐藏</button>';
+  h += '<button class="btn btn-outline" id="btn-show-selected">仅显示选中</button>';
+  h += '</div>';
+  h += '<div class="section-title">BOM 条目</div>';
+  h += '<div id="bom-list" style="margin:4px 12px;max-height:120px;overflow-y:auto;font-size:11px;color:#ccc;"></div>';
   h += '<div class="section-title">视角</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-outline" id="btn-vfront">前视</button>';
@@ -133,8 +220,11 @@ function renderPositionPanel() {
 
 function renderExplosionPanel() {
   let h = '';
-  h += '<div class="section-title">目标部件</div>';
-  h += '<div class="btn-group"><button class="btn btn-pri" id="btn-load">加载装配数据</button></div>';
+  h += '<div class="section-title">数据加载</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-pri" id="btn-load-bom-explosion">加载 BOM + 分析</button>';
+  h += '<button class="btn btn-outline" id="btn-load">加载 JSON</button>';
+  h += '</div>';
   h += '<div class="section-title">爆炸控制</div>';
   h += '<div class="slider-row"><span>距离</span><input type="range" id="slider-dist" min="10" max="2000" value="150" step="5"><span id="val-dist">150</span>mm</div>';
   h += '<div class="btn-group">';
@@ -182,11 +272,15 @@ function renderDisassemblyPanel() {
   h += '<div class="section-title">管线进度</div>';
   h += '<div id="pipeline-log-placeholder" style="margin:4px 10px;padding:6px;background:#0a0a1a;border-radius:3px;font-family:Consolas,monospace;font-size:9px;color:#7ec8e3;max-height:120px;overflow-y:auto;"></div>';
   h += '<div class="section-title">加载</div>';
-  h += '<div class="btn-group"><button class="btn btn-pri" id="btn-load">加载装配数据</button></div>';
-  h += '<div class="section-title">层级拆装</div>';
+  h += '<div class="btn-group"><button class="btn btn-pri" id="btn-load">加载 JSON</button></div>';
+  h += '<div class="section-title">依赖链分析</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-pri" id="btn-pipeline-chain">选中目标 → 分析拆卸链</button>';
+  h += '<span id="sel-node-display" style="padding:5px;color:#7ec8e3;font-size:11px;">未选中</span>';
+  h += '</div>';
+  h += '<div class="section-title">全量拆装</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-outline" id="btn-pipeline-node">选中节点 → 生成拆装方案</button>';
-  h += '<span id="sel-node-display" style="padding:5px;color:#7ec8e3;font-size:11px;">未选中</span>';
   h += '</div>';
   h += '<div class="section-title">爆炸</div>';
   h += '<div class="btn-group">';
@@ -229,7 +323,7 @@ function _bindFixedButtons() {
     const partIds = t.tree.getSelectedPartIds();
     if (!partIds || partIds.length === 0) { statusBar.textContent = '请先在结构树中选择节点'; return; }
     for (const id of partIds) shared.fixedPartIds.add(id);
-    for (const tab of tabs) tab.explo.setFixedPartIds(shared.fixedPartIds);
+    sharedExplo.setFixedPartIds(shared.fixedPartIds);
     for (const tab of tabs) {
       if (tab.tree) tab.tree.setFixedPartIds(shared.fixedPartIds);
     }
@@ -237,7 +331,7 @@ function _bindFixedButtons() {
   });
   document.getElementById('btn-clear-fixed')?.addEventListener('click', () => {
     shared.fixedPartIds.clear();
-    for (const tab of tabs) tab.explo.setFixedPartIds([]);
+    sharedExplo.setFixedPartIds([]);
     for (const tab of tabs) {
       if (tab.tree) tab.tree.setFixedPartIds([]);
     }
@@ -247,20 +341,28 @@ function _bindFixedButtons() {
 
 function _bindDisassemblyButtons() {
   document.getElementById('btn-disassemble')?.addEventListener('click', () => {
-    tabs[activeTab].explo.disassembleSequential(800);
+    sharedExplo.disassembleSequential(800);
     statusBar.textContent = '逐件拆卸演示中...';
   });
   document.getElementById('btn-step')?.addEventListener('click', () => {
-    tabs[activeTab].explo.disassembleOneStep(600);
+    sharedExplo.disassembleOneStep(600);
     statusBar.textContent = '单步拆卸';
   });
   document.getElementById('btn-restore')?.addEventListener('click', () => {
-    tabs[activeTab].explo.restoreAll();
+    sharedExplo.restoreAll();
     statusBar.textContent = '已复位全部零件';
   });
 }
 
 function bindPositionPanel() {
+  document.getElementById('btn-load-bom')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    statusBar.textContent = '加载 BOM 中...';
+    await window.electronAPI.runBomPreviewPipeline();
+  });
+
+  document.getElementById('btn-load-assembly')?.addEventListener('click', loadAssembly);
+
   document.getElementById('sel-body')?.addEventListener('change', async (e) => {
     await bodyLoader.switchBody(e.target.selectedIndex, sm.scene);
   });
@@ -286,38 +388,72 @@ function bindPositionPanel() {
       statusBar.textContent = '导入车壳失败';
     }
   });
-  document.getElementById('btn-load')?.addEventListener('click', loadAssembly);
-  document.getElementById('btn-annot-show')?.addEventListener('click', () => {
-    if (shared.assembly) annot.setParts(shared.assembly.parts);
-    annot.show();
+
+  document.getElementById('btn-show-all')?.addEventListener('click', () => {
+    shared.hiddenPartIds.clear();
+    _applyVisibilityToScene();
+    for (const t of tabs) { if (t.tree) t.tree.setHiddenPartIds(new Set()); }
+    statusBar.textContent = '已全部显示';
   });
+
+  document.getElementById('btn-hide-all')?.addEventListener('click', () => {
+    for (const m of shared.meshes) shared.hiddenPartIds.add(m.userData.partId);
+    _applyVisibilityToScene();
+    for (const t of tabs) { if (t.tree) t.tree.setHiddenPartIds(shared.hiddenPartIds); }
+    statusBar.textContent = '已全部隐藏';
+  });
+
+  document.getElementById('btn-show-selected')?.addEventListener('click', () => {
+    const t = tabs[activeTab];
+    if (!t.tree) { statusBar.textContent = '请先加载数据'; return; }
+    t.tree.showOnlySelected();
+    shared.hiddenPartIds = t.tree.getHiddenPartIds();
+    _applyVisibilityToScene();
+    statusBar.textContent = '仅显示选中: ' + shared.hiddenPartIds.size + ' 隐藏';
+  });
+
+  document.getElementById('btn-annot-show')?.addEventListener('click', () => {
+    if (shared.assembly) annot.setParts(shared.assembly.parts, shared.checkedPartIds);
+    annot.setHiddenPartIds(shared.hiddenPartIds);
+    annot.show();
+    annot.draw();
+  });
+
   document.getElementById('btn-annot-hide')?.addEventListener('click', () => annot.clear());
   document.getElementById('btn-export')?.addEventListener('click', _exportAnnotated);
   _bindViewButtons();
   _bindFixedButtons();
   buildActiveTree();
+  _renderBomList();
 }
 
 function bindExplosionPanel() {
+  document.getElementById('btn-load-bom-explosion')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    statusBar.textContent = 'BOM 全管线分析中...';
+    await window.electronAPI.runBomFullPipeline(null);
+  });
   document.getElementById('btn-load')?.addEventListener('click', loadAssembly);
   const slider = document.getElementById('slider-dist');
   const val = document.getElementById('val-dist');
   slider?.addEventListener('input', () => {
     const v = parseInt(slider.value);
     val.textContent = v;
-    tabs[activeTab].explo.setExplosionDistance(v);
+    sharedExplo.setExplosionDistance(v);
   });
-  document.getElementById('btn-explode')?.addEventListener('click', () => tabs[activeTab].explo.explodeGroupsAnimated(800));
-  document.getElementById('btn-explode-instant')?.addEventListener('click', () => tabs[activeTab].explo.explodeGroupsInstant());
-  document.getElementById('btn-reset')?.addEventListener('click', () => { tabs[activeTab].explo.resetPositions(); tabs[activeTab].explo.hideThrustLines(); });
-  document.getElementById('btn-manual-on')?.addEventListener('click', () => tabs[activeTab].explo.enableManualMode());
-  document.getElementById('btn-manual-off')?.addEventListener('click', () => tabs[activeTab].explo.disableManualMode());
+  document.getElementById('btn-explode')?.addEventListener('click', () => sharedExplo.explodeGroupsAnimated(800));
+  document.getElementById('btn-explode-instant')?.addEventListener('click', () => sharedExplo.explodeGroupsInstant());
+  document.getElementById('btn-reset')?.addEventListener('click', () => { sharedExplo.resetPositions(); sharedExplo.hideThrustLines(); });
+  document.getElementById('btn-manual-on')?.addEventListener('click', () => sharedExplo.enableManualMode());
+  document.getElementById('btn-manual-off')?.addEventListener('click', () => sharedExplo.disableManualMode());
   document.getElementById('btn-annot-show')?.addEventListener('click', () => {
-    if (shared.assembly) annot.setParts(shared.assembly.parts);
+    if (shared.assembly) annot.setParts(shared.assembly.parts, shared.checkedPartIds);
+    annot.setHiddenPartIds(shared.hiddenPartIds);
     annot.show();
+    annot.draw();
   });
   document.getElementById('btn-annot-hide')?.addEventListener('click', () => annot.clear());
-  document.getElementById('btn-thrust')?.addEventListener('click', () => tabs[activeTab].explo.toggleThrustLines());
+  document.getElementById('btn-thrust')?.addEventListener('click', () => sharedExplo.toggleThrustLines());
   document.getElementById('btn-export')?.addEventListener('click', _exportAnnotated);
   _bindViewButtons();
   _bindFixedButtons();
@@ -327,15 +463,28 @@ function bindExplosionPanel() {
 
 function bindDisassemblyPanel() {
   document.getElementById('btn-load')?.addEventListener('click', loadAssembly);
-  document.getElementById('btn-explode')?.addEventListener('click', () => tabs[activeTab].explo.explodeGroupsAnimated(800));
-  document.getElementById('btn-reset')?.addEventListener('click', () => tabs[activeTab].explo.resetPositions());
+
+  document.getElementById('btn-pipeline-chain')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    const targetPart = shared.selectedNode || tabs[activeTab].tree?.getCheckedNodeId();
+    if (!targetPart) { statusBar.textContent = '请先在结构树中选择或勾选目标零件'; return; }
+    if (!shared.bomSourcePath) { statusBar.textContent = '请先通过位置图加载BOM数据'; return; }
+    statusBar.textContent = '分析拆卸依赖链: ' + targetPart + '...';
+    await window.electronAPI.runBomFullPipelineCached(
+      shared.bomSourcePath, shared.bomModelsDir, targetPart);
+  });
+  document.getElementById('btn-explode')?.addEventListener('click', () => sharedExplo.explodeGroupsAnimated(800));
+  document.getElementById('btn-reset')?.addEventListener('click', () => sharedExplo.resetPositions());
   document.getElementById('btn-export')?.addEventListener('click', _exportSimple);
   document.getElementById('btn-pipeline-node')?.addEventListener('click', async () => {
     if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
-    const nodeName = shared.selectedNode;
-    if (!nodeName) { statusBar.textContent = '请先在结构树中选择一个节点'; return; }
+    const nodeName = shared.checkedPartIds.size > 0
+      ? (tabs[activeTab].tree ? tabs[activeTab].tree.getCheckedNodeId() : null)
+      : shared.selectedNode;
+    if (!nodeName) { statusBar.textContent = '请先在结构树中勾选或选择一个节点'; return; }
+    if (!shared.sourceStpPath) { statusBar.textContent = '请先导入 STP 预览 (Ctrl+I)'; return; }
     statusBar.textContent = '启动管线 (节点: ' + nodeName + ')...';
-    await window.electronAPI.runPipelineForNode(nodeName);
+    await window.electronAPI.runPipelineForNodeCached(shared.sourceStpPath, nodeName);
   });
   _bindFixedButtons();
   _bindDisassemblyButtons();
@@ -372,40 +521,136 @@ function buildActiveTree() {
         }
       }
     },
+    onCheckChange: (nodeId, partIds) => {
+      shared.checkedPartIds = new Set(partIds);
+      _rebuildExplosionGroups();
+      if (nodeId) {
+        _highlightParts([...partIds]);
+        statusBar.textContent = '编组: ' + nodeId + ' (' + partIds.size + ' 零件)';
+      } else {
+        _clearHighlight();
+        statusBar.textContent = '已取消编组';
+      }
+    },
+    onVisibilityChange: (nodeId, partIds, visible) => {
+      if (visible) {
+        for (const pid of partIds) shared.hiddenPartIds.delete(pid);
+      } else {
+        for (const pid of partIds) shared.hiddenPartIds.add(pid);
+      }
+      _applyVisibilityToScene();
+      const count = shared.hiddenPartIds.size;
+      statusBar.textContent = visible ? '已显示: ' + partIds.length + ' 零件' : '已隐藏: ' + partIds.length + ' 零件 (共' + count + ')';
+    },
   });
   t.tree.build(shared.hierarchy, shared.assembly.parts, shared.assembly.stages);
   t.tree.setFixedPartIds(shared.fixedPartIds);
+  t.tree.setHiddenPartIds(shared.hiddenPartIds);
+}
+
+function _rebuildExplosionGroups() {
+  if (!shared.assembly || !shared.loaded) return;
+  const baseGroups = AssemblyLoader._buildGroups(shared.assembly, shared.loaded);
+  if (shared.checkedPartIds.size === 0) {
+    shared.groups = baseGroups;
+    sharedExplo.loadAssemblyGroups(shared.groups);
+    return;
+  }
+  const mergedMeshes = [];
+  const otherGroups = [];
+  for (const g of baseGroups) {
+    const allIn = g.meshes.every(m => shared.checkedPartIds.has(m.userData.partId));
+    if (allIn) {
+      mergedMeshes.push(...g.meshes);
+    } else {
+      otherGroups.push(g);
+    }
+  }
+  if (mergedMeshes.length > 0) {
+    otherGroups.unshift({
+      id: '__merged__',
+      name: '[编组]',
+      meshes: mergedMeshes,
+      direction: '+Y',
+      distanceMultiplier: 1.0,
+      stage: 1,
+    });
+  }
+  shared.groups = otherGroups;
+  sharedExplo.loadAssemblyGroups(shared.groups);
 }
 
 // ── Load Assembly ────────────────────────────────────────
 
 function _glbPath(dir, glbFile) {
-  if (glbFile.indexOf('/') === -1 && glbFile.indexOf('\\') === -1) {
-    return dir + '/parts/' + glbFile;
-  }
-  return dir + '/' + glbFile;
+  const baseName = glbFile.replace(/^.*[\\/]/, '');
+  return dir.replace(/\\/g, '/').replace(/\/$/, '') + '/parts/' + baseName;
+}
+
+// ── Helpers: dispose Three.js resources ─────────────────
+
+function _disposeObject3D(obj) {
+  obj.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    const mats = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
+    for (const m of mats) {
+      for (const k of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'aoMap', 'specularMap']) {
+        if (m[k] && typeof m[k].dispose === 'function') m[k].dispose();
+      }
+      if (typeof m.dispose === 'function') m.dispose();
+    }
+  });
 }
 
 async function _loadModelCore(assembly, dir) {
-  // Clear previous models from scene
+  // Clear previous models from scene AND dispose their GPU resources
   if (shared.loaded) {
     for (const [, p] of shared.loaded) {
-      if (p.modelData && p.modelData.scene) sm.scene.remove(p.modelData.scene);
+      if (p.modelData && p.modelData.scene) {
+        sm.scene.remove(p.modelData.scene);
+        _disposeObject3D(p.modelData.scene);
+      }
     }
   }
+
+  // Reset all shared state to avoid stale references
+  shared.hiddenPartIds = new Set();
+  shared.checkedPartIds = new Set();
+  shared.fixedPartIds = new Set();
+  shared.selectedNode = null;
+  shared.bomEntries = [];
+  _highlightedParts.length = 0;
+  if (sharedExplo && typeof sharedExplo._clearGroups === 'function') sharedExplo._clearGroups();
+  if (annot && typeof annot.clear === 'function') annot.clear();
+
   shared.assembly = assembly;
   shared.loaded = new Map();
   shared.meshes = [];
 
   let meshCount = 0;
+  let skipCount = 0;
   for (const part of assembly.parts) {
     const glbPath = _glbPath(dir, part.glbFile);
-    if (!(await window.electronAPI.fileExists(glbPath))) continue;
-    const url = 'local:///' + glbPath.replace(/\\/g, '/');
+    if (!(await window.electronAPI.fileExists(glbPath))) {
+      skipCount++;
+      if (skipCount <= 3) _logPipeline('SKIP: ' + glbPath + ' (file not found or access denied)');
+      continue;
+    }
+    // Encode each path segment to be URL-safe for the local:// protocol
+    const segments = glbPath.replace(/\\/g, '/').split('/');
+    const drive = (segments[0].indexOf(':') >= 0) ? segments.shift().replace(':', '') : '';
+    const pathPart = segments.map(seg => encodeURIComponent(seg)).join('/');
+    const url = drive ? ('local://' + drive.toLowerCase() + '/' + pathPart) : ('local:///' + pathPart);
     try {
       const data = await modelLoader.loadModel(url);
       shared.loaded.set(part.id, { ...part, modelData: data, meshes: data.meshes });
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      skipCount++;
+      _logPipeline('FAIL: ' + url + ' — ' + (e && e.message || e));
+    }
+  }
+  if (skipCount > 0) {
+    _logPipeline('WARNING: ' + skipCount + '/' + assembly.parts.length + ' parts skipped (paths above)');
   }
 
   for (const [, p] of shared.loaded) {
@@ -423,17 +668,24 @@ async function _loadModelCore(assembly, dir) {
         m.material.color.set(0xbbbbbb);
       }
     }
-    if (p.modelData && p.modelData.scene) sm.scene.add(p.modelData.scene);
+    if (p.modelData && p.modelData.scene) {
+      if (p.transform && Array.isArray(p.transform) && p.transform.length === 16) {
+        const mat = new THREE.Matrix4();
+        mat.fromArray(p.transform);
+        p.modelData.scene.applyMatrix4(mat);
+      }
+      sm.scene.add(p.modelData.scene);
+    }
   }
 
   shared.groups = AssemblyLoader._buildGroups(assembly, shared.loaded);
   shared.hierarchy = assembly.hierarchy || [];
-  shared.fixedPartIds.clear();
-  for (const t of tabs) t.explo.loadAssemblyGroups(shared.groups);
+  sharedExplo.loadAssemblyGroups(shared.groups);
 
   _logPipeline('Loaded ' + shared.loaded.size + ' parts, ' + meshCount + ' meshes');
   _logPipeline('Scene children: ' + sm.scene.children.length);
 
+  _applyVisibilityToScene();
   buildActiveTree();
   _focusCamera();
   _setupViewportClick();
@@ -489,6 +741,20 @@ async function loadAssembly() {
 // ── Viewport Click → Highlight Part ───────────────────────
 
 let _highlightedParts = [];
+
+function _applyVisibilityToScene() {
+  for (const mesh of shared.meshes) {
+    mesh.visible = !shared.hiddenPartIds.has(mesh.userData.partId);
+  }
+}
+
+function _setPartVisibility(partId, visible) {
+  for (const mesh of shared.meshes) {
+    if (mesh.userData.partId === partId) {
+      mesh.visible = visible;
+    }
+  }
+}
 
 function _clearHighlight() {
   for (const entry of _highlightedParts) {
@@ -562,7 +828,7 @@ function _setupViewportClick() {
 
     const t = tabs[activeTab];
     if (t.tree) {
-      const sel = t.tree.container.querySelector('[data-part-id="' + partId + '"]');
+      const sel = t.tree.container.querySelector('[data-node-id="' + partId + '"]');
       if (sel) {
         if (t.tree.selected) t.tree.selected.classList.remove('selected');
         t.tree.selected = sel;
@@ -608,16 +874,33 @@ function _logPipeline(msg) {
 if (window.electronAPI) {
   window.electronAPI.onPipelineProgress((msg) => _logPipeline(msg));
   window.electronAPI.onPipelineMode((mode) => { pipelineMode = mode; });
-  window.electronAPI.onPipelineStarted(() => {
+  window.electronAPI.onPipelineStarted((stpPath) => {
+    if (stpPath) {
+      shared.sourceStpPath = stpPath;
+      if (pipelineMode === 'bom-preview' || pipelineMode === 'bom-full') {
+        shared.bomSourcePath = stpPath;
+        shared.bomModelsDir = null;
+      }
+    }
     const log = getPipelineLog();
     if (log) log.innerHTML = '';
     _logPipeline('管线启动...');
-    if (pipelineMode === 'full') switchTab(2);
+    if (pipelineMode === 'full' || pipelineMode === 'bom-full') switchTab(2);
   });
-  window.electronAPI.onPipelineComplete(async (jsonPath) => {
-    _logPipeline('完成! ' + jsonPath);
-    const targetIdx = pipelineMode === 'full' ? 2 : activeTab;
-    await _loadPipelineResult(jsonPath, targetIdx);
+  // Serialize concurrent pipeline-complete events so double-clicks don't race.
+  let _loadingChain = Promise.resolve();
+  window.electronAPI.onPipelineComplete((jsonPath) => {
+    _loadingChain = _loadingChain.then(async () => {
+      try {
+        _logPipeline('完成! ' + jsonPath);
+        const targetIdx = (pipelineMode === 'full' || pipelineMode === 'bom-full') ? 2 : activeTab;
+        await _loadPipelineResult(jsonPath, targetIdx);
+        _renderBomList();
+      } catch (err) {
+        console.error('pipeline complete load failed:', err);
+        statusBar.textContent = '加载失败: ' + (err && err.message);
+      }
+    });
   });
 }
 
@@ -629,6 +912,21 @@ if (window.electronAPI) {
 }
 
 // ── Startup ──────────────────────────────────────────────
-bodyLoader.loadManifest('bodies/manifest.json', modelLoader).then(() => renderPanel(0));
+bodyLoader.loadManifest('bodies/manifest.json', modelLoader)
+  .then(() => renderPanel(0))
+  .catch((err) => {
+    console.error('body manifest load failed:', err);
+    renderPanel(0);
+  });
+
+// Global error handlers
+window.addEventListener('unhandledrejection', (e) => {
+  console.error('unhandled rejection:', e.reason);
+  if (statusBar) statusBar.textContent = '错误: ' + (e.reason && e.reason.message || e.reason);
+});
+window.addEventListener('error', (e) => {
+  console.error('runtime error:', e.message);
+});
+
 sm.renderer.domElement.style.display = 'block';
-statusBar.textContent = '就绪 — Ctrl+O 加载数据 | Ctrl+I 导入 STP 预览';
+statusBar.textContent = '就绪 — Ctrl+B 加载BOM | Ctrl+O 加载JSON';

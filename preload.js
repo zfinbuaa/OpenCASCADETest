@@ -7,6 +7,20 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
+const _listenerMap = new Map();
+
+function exclusiveOn(channel, cb) {
+  const old = _listenerMap.get(channel);
+  if (old) ipcRenderer.removeListener(channel, old);
+  const wrapped = (_event, ...args) => cb(...args);
+  ipcRenderer.on(channel, wrapped);
+  _listenerMap.set(channel, wrapped);
+  return () => {
+    ipcRenderer.removeListener(channel, wrapped);
+    _listenerMap.delete(channel);
+  };
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
   // ── Dialog ────────────────────────────────────────────
 
@@ -33,68 +47,66 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Run pipeline scoped to a specific sub-assembly node. */
   runPipelineForNode: (rootNode) => ipcRenderer.invoke('run-pipeline-for-node', rootNode),
 
+  /** Run pipeline for node using cached STP path (no file dialog). */
+  runPipelineForNodeCached: (stpPath, rootNode) => ipcRenderer.invoke('run-pipeline-for-node-cached', stpPath, rootNode),
+
+  /** Run BOM preview pipeline (BOM → mesh + glb, no analysis). */
+  runBomPreviewPipeline: () => ipcRenderer.invoke('run-bom-preview-pipeline'),
+
+  /** Run BOM full pipeline with optional target part for dependency chain. */
+  runBomFullPipeline: (targetPart) => ipcRenderer.invoke('run-bom-full-pipeline', targetPart),
+
+  /** Run BOM full pipeline with cached paths (no file dialog). */
+  runBomFullPipelineCached: (bomPath, modelsDir, targetPart) => ipcRenderer.invoke('run-bom-full-pipeline-cached', bomPath, modelsDir, targetPart),
+
+  /** Run preview pipeline (STP → mesh + glb, no analysis). */
+  runPreviewPipeline: () => ipcRenderer.invoke('run-preview-pipeline'),
+
   // ── Pipeline ──────────────────────────────────────────
 
   /** Listen for pipeline stdout progress lines. */
-  onPipelineProgress: (callback) => {
-    ipcRenderer.on('pipeline-progress', (_event, msg) => callback(msg));
-  },
+  onPipelineProgress: (callback) => exclusiveOn('pipeline-progress', callback),
 
   /** Pipeline mode: 'preview' or 'full'. Sent before pipeline-started. */
-  onPipelineMode: (callback) => {
-    ipcRenderer.on('pipeline-mode', (_event, mode) => callback(mode));
-  },
+  onPipelineMode: (callback) => exclusiveOn('pipeline-mode', callback),
 
   /** Pipeline started. */
-  onPipelineStarted: (callback) => {
-    ipcRenderer.on('pipeline-started', (_event, path) => callback(path));
-  },
+  onPipelineStarted: (callback) => exclusiveOn('pipeline-started', callback),
 
   /** Pipeline completed successfully. */
-  onPipelineComplete: (callback) => {
-    ipcRenderer.on('pipeline-complete', (_event, jsonPath) => callback(jsonPath));
-  },
+  onPipelineComplete: (callback) => exclusiveOn('pipeline-complete', callback),
 
   /** Pipeline failed. */
-  onPipelineError: (callback) => {
-    ipcRenderer.on('pipeline-error', (_event, code) => callback(code));
-  },
+  onPipelineError: (callback) => exclusiveOn('pipeline-error', callback),
 
   // ── Menu events ───────────────────────────────────────
 
   /** Menu: File > Load assembly */
-  onMenuLoadAssembly: (callback) => {
-    ipcRenderer.on('menu-load-assembly', () => callback());
-  },
+  onMenuLoadAssembly: (callback) => exclusiveOn('menu-load-assembly', callback),
 
   /** Menu: View > Reset camera */
-  onMenuResetCamera: (callback) => {
-    ipcRenderer.on('menu-reset-camera', () => callback());
-  },
+  onMenuResetCamera: (callback) => exclusiveOn('menu-reset-camera', callback),
 
   /** Menu: View > Toggle ghost mode */
-  onMenuToggleGhost: (callback) => {
-    ipcRenderer.on('menu-toggle-ghost', () => callback());
-  },
+  onMenuToggleGhost: (callback) => exclusiveOn('menu-toggle-ghost', callback),
 
   /** Menu: View > Toggle annotations */
-  onMenuToggleAnnotations: (callback) => {
-    ipcRenderer.on('menu-toggle-annotations', () => callback());
-  },
+  onMenuToggleAnnotations: (callback) => exclusiveOn('menu-toggle-annotations', callback),
 
   /** Menu: Export > Screenshot */
-  onMenuScreenshot: (callback) => {
-    ipcRenderer.on('menu-screenshot', () => callback());
-  },
+  onMenuScreenshot: (callback) => exclusiveOn('menu-screenshot', callback),
 
   /** Menu: Export > Batch capture */
-  onMenuBatchCapture: (callback) => {
-    ipcRenderer.on('menu-batch-capture', () => callback());
-  },
+  onMenuBatchCapture: (callback) => exclusiveOn('menu-batch-capture', callback),
 
   // ── Cleanup ───────────────────────────────────────────
 
   removeAllListeners: (channel) => {
+    const old = _listenerMap.get(channel);
+    if (old) {
+      ipcRenderer.removeListener(channel, old);
+      _listenerMap.delete(channel);
+    }
     ipcRenderer.removeAllListeners(channel);
   },
 });

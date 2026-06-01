@@ -17,10 +17,13 @@ Algorithm:
   4. distanceMultiplier = stage_number (inner parts explode farther)
 """
 
+import logging
 import sys
 import numpy as np
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.BRepGProp import brepgprop
+
+logger = logging.getLogger(__name__)
 
 
 def _compute_centroid(shape):
@@ -69,11 +72,15 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
     """
     from pipeline.collision_check import (
         check_disassembly_path, find_best_feasible_direction,
-        filter_obstacles_by_compound_bbox
+        filter_obstacles_by_compound_bbox, precompute_compound_bbox_cache
     )
 
     part_map = {p["name"]: p for p in parts}
     part_names = list(part_map.keys())
+
+    # Precompute compound bounding boxes once for all stages
+    sa_bbox_cache = precompute_compound_bbox_cache(
+        sub_assemblies, part_map, collision_data)
 
     if assembly_centroid is None:
         centroids = {p["name"]: _compute_centroid(p["shape"]) for p in parts}
@@ -122,16 +129,20 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
                     max_distance, collision_data)
 
                 verified_dirs[name] = best_dir
-                stage1.append(name)
-                details.append({
-                    "part": name, "stage": 1,
-                    "feasible": best_result["feasible"],
-                    "direction": best_dir,
-                    "safe_distance": best_result["max_safe_distance"],
-                    "collision_with": best_result.get("collision_with"),
-                })
+                if best_result["feasible"]:
+                    stage1.append(name)
+                    details.append({
+                        "part": name, "stage": 1,
+                        "feasible": best_result["feasible"],
+                        "direction": best_dir,
+                        "safe_distance": best_result["max_safe_distance"],
+                        "collision_with": best_result.get("collision_with"),
+                    })
+                else:
+                    logger.warning("fastener %s not feasible in stage 1, deferred", name)
 
-            distance_multipliers[name] = 1
+            if name in stage1:
+                distance_multipliers[name] = 1
 
         stages.append(stage1)
         remaining -= set(stage1)
@@ -158,19 +169,26 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
         stage_details = []
         deferred = []
         best_deferred = None
-        best_deferred_safe = -1.0
+        best_deferred_safe = float('-inf')
         best_deferred_dir = None
 
         checked = 0
         for name in sorted_remaining:
             if name not in remaining:
                 continue
+            try:
+                from pipeline import is_cancelled
+                if is_cancelled():
+                    logger.warning("DAG builder cancelled by user signal")
+                    return stages, verified_dirs, distance_multipliers, details
+            except Exception:
+                pass
             part = part_map[name]
 
             obstacles = filter_obstacles_by_compound_bbox(
                 name, part["shape"], list(remaining),
                 part_map, sub_assemblies, collision_data,
-                max_distance)
+                max_distance, sa_bbox_cache=sa_bbox_cache)
 
             result = check_disassembly_path(
                 name, part["shape"], obstacles, verified_dirs[name],
@@ -248,6 +266,15 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
                 "    WARNING: no parts could be removed at stage {}\n".format(
                     stage_num))
             sys.stdout.flush()
+            for leftover_name in sorted(remaining):
+                details.append({
+                    "part": leftover_name,
+                    "stage": stage_num,
+                    "feasible": False,
+                    "reason": "deadlock-drop",
+                    "direction": verified_dirs.get(leftover_name, [0, 1, 0]),
+                    "safe_distance": 0.0,
+                })
             break
 
         stage_num += 1
@@ -299,8 +326,8 @@ def build_disassembly_dag(parts, contacts, fasteners=None, directions=None):
                 current_stage.append(name)
 
         if not current_stage:
-            min_name = min(remaining,
-                           key=lambda n: len(blocked_by[n] & remaining))
+            min_name = sorted(remaining,
+                              key=lambda n: (len(blocked_by[n] & remaining), n))[0]
             current_stage = [min_name]
 
         stages.append(current_stage)

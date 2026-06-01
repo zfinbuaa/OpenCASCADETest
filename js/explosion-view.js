@@ -2,7 +2,7 @@
  * Explosion View — 爆炸动画 + TransformControls 手动拖拽 + 固定参照物。
  */
 
-import * as THREE from 'three';
+import * as THREE from '../node_modules/three/build/three.module.js';
 import { TransformControls } from './three-addons/controls/TransformControls.js';
 
 const _CLICK_THRESHOLD = 5;
@@ -18,11 +18,13 @@ export class ExplosionView {
     this.meshToGroup = new Map();
     this.explodedPositions = new Map();
     this.originalPositions = new Map();
+    this.originalLocalPositions = new Map();
     this.explosionDistance = 150;
     this.isExploded = false;
     this._statusCallback = null;
     this._fixedPartIds = new Set();
     this._ghostMeshes = new Map();
+    this._matSnapshot = new Map();
 
     this._thrustLines = [];
     this._thrustVisible = false;
@@ -43,7 +45,7 @@ export class ExplosionView {
         if (this._orbitControls) this._orbitControls.enabled = true;
         if (this._selectedMesh) {
           this.explodedPositions.set(this._selectedMesh,
-            this._selectedMesh.position.clone());
+            this._selectedMesh.getWorldPosition(new THREE.Vector3()));
         }
       }
     });
@@ -87,34 +89,67 @@ export class ExplosionView {
     return this._fixedPartIds.has(mesh.userData.partId);
   }
 
+  _applyWorldOffset(mesh, worldOffset) {
+    if (mesh.parent) {
+      mesh.parent.updateMatrixWorld(true);
+      const parentInv = new THREE.Matrix4().copy(mesh.parent.matrixWorld).invert();
+      const localOffset = worldOffset.clone().transformDirection(parentInv);
+      mesh.position.add(localOffset);
+    } else {
+      mesh.position.add(worldOffset);
+    }
+  }
+
+  // ── Material State Snapshot ────────────────────
+  // Snapshot before any mutation, restore from snapshot. This avoids
+  // the bug where fade-out's mutation gets recorded as the "original" state.
+
+  _saveMaterialState(mesh) {
+    if (!mesh.material) return;
+    if (this._matSnapshot.has(mesh)) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    this._matSnapshot.set(mesh, mats.map(m => ({
+      opacity: m.opacity,
+      transparent: m.transparent,
+      depthWrite: m.depthWrite,
+    })));
+  }
+
+  _restoreMaterialState(mesh) {
+    const snap = this._matSnapshot.get(mesh);
+    if (!snap || !mesh.material) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (let i = 0; i < mats.length; i++) {
+      const s = snap[i];
+      if (!s) continue;
+      mats[i].opacity = s.opacity;
+      mats[i].transparent = s.transparent;
+      mats[i].depthWrite = s.depthWrite;
+      mats[i].needsUpdate = true;
+    }
+    this._matSnapshot.delete(mesh);
+  }
+
   _setMeshGhost(mesh, ghost) {
     if (!mesh.material) return;
-    if (this._ghostMeshes.has(mesh) === ghost) return;
-
-    if (ghost && !this._ghostMeshes.has(mesh)) {
-      this._ghostMeshes.set(mesh, {
-        transparent: mesh.material.transparent,
-        opacity: mesh.material.opacity,
-        depthWrite: mesh.material.depthWrite,
-      });
-    }
+    const isGhosted = this._ghostMeshes.has(mesh);
+    if (isGhosted === ghost) return;
 
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    for (const mat of mats) {
-      mat.transparent = ghost;
-      mat.opacity = ghost ? 0.25 : 1.0;
-      mat.depthWrite = !ghost;
-      mat.needsUpdate = true;
-    }
 
-    if (!ghost && this._ghostMeshes.has(mesh)) {
-      const orig = this._ghostMeshes.get(mesh);
+    if (ghost) {
+      // Save before mutation
+      this._saveMaterialState(mesh);
+      this._ghostMeshes.set(mesh, true);
       for (const mat of mats) {
-        mat.transparent = orig.transparent;
-        mat.opacity = orig.opacity;
-        mat.depthWrite = orig.depthWrite;
+        mat.transparent = true;
+        mat.opacity = 0.25;
+        mat.depthWrite = false;
         mat.needsUpdate = true;
       }
+    } else {
+      // Restore from snapshot
+      this._restoreMaterialState(mesh);
       this._ghostMeshes.delete(mesh);
     }
   }
@@ -124,11 +159,14 @@ export class ExplosionView {
   loadAssemblyGroups(groups) {
     this._clearGroups();
     this.assemblyGroups = groups;
+    this.scene.updateMatrixWorld(true);
     for (const g of groups) {
       for (const mesh of g.meshes) {
         this.meshToGroup.set(mesh, g.id);
-        this.originalPositions.set(mesh, mesh.position.clone());
-        this.explodedPositions.set(mesh, mesh.position.clone());
+        const worldPos = mesh.getWorldPosition(new THREE.Vector3());
+        this.originalPositions.set(mesh, worldPos.clone());
+        this.explodedPositions.set(mesh, worldPos.clone());
+        this.originalLocalPositions.set(mesh, mesh.position.clone());
         if (this._isFixedMesh(mesh)) {
           this._setMeshGhost(mesh, true);
         }
@@ -144,8 +182,10 @@ export class ExplosionView {
     this.assemblyGroups = [];
     this.meshToGroup.clear();
     this.originalPositions.clear();
+    this.originalLocalPositions.clear();
     this.explodedPositions.clear();
     this._ghostMeshes.clear();
+    this._matSnapshot.clear();
     this._removedMeshes.clear();
     this._disassembling = false;
     this._disassembleStage = 0;
@@ -192,13 +232,18 @@ export class ExplosionView {
         const dist = this.explosionDistance * (group.distanceMultiplier || 1);
         for (const mesh of group.meshes) {
           if (this._isFixedMesh(mesh)) continue;
-          const origin = this.explodedPositions.get(mesh).clone();
+          if (!mesh.visible) continue;
+          const sp = this.explodedPositions.get(mesh);
+          if (!sp) continue;
+          const origin = sp.clone();
           const target = origin.clone().add(dir.clone().multiplyScalar(dist));
           targets.set(mesh, target);
         }
       }
-      await this._animateToPositions(targets, duration / stages.length);
-      await new Promise(r => setTimeout(r, 300));
+      if (targets.size > 0) {
+        await this._animateToPositions(targets, duration / stages.length);
+        await new Promise(r => setTimeout(r, 300));
+      }
     }
     this.isExploded = true;
     this._setStatus('爆炸完成');
@@ -208,11 +253,13 @@ export class ExplosionView {
     for (const g of this.assemblyGroups) {
       const dir = this._directionToVector(g.direction);
       const dist = this.explosionDistance * (g.distanceMultiplier || 1);
+      const worldOffset = dir.clone().multiplyScalar(dist);
       for (const mesh of g.meshes) {
         if (this._isFixedMesh(mesh)) continue;
+        if (!mesh.visible) continue;
         const origin = this.originalPositions.get(mesh).clone();
-        const target = origin.clone().add(dir.clone().multiplyScalar(dist));
-        mesh.position.copy(target);
+        const target = origin.clone().add(worldOffset);
+        this._applyWorldOffset(mesh, worldOffset);
         this.explodedPositions.set(mesh, target.clone());
       }
     }
@@ -223,7 +270,7 @@ export class ExplosionView {
   resetPositions() {
     for (const [mesh, pos] of this.originalPositions) {
       if (this._isFixedMesh(mesh)) continue;
-      mesh.position.copy(pos);
+      mesh.position.copy(this.originalLocalPositions.get(mesh) || pos);
       this.explodedPositions.set(mesh, pos.clone());
     }
     this.isExploded = false;
@@ -234,7 +281,7 @@ export class ExplosionView {
     return new Promise((resolve) => {
       const startTime = performance.now();
       const startPositions = new Map();
-      for (const [mesh, tgt] of targets) {
+      for (const [mesh] of targets) {
         startPositions.set(mesh, this.explodedPositions.get(mesh).clone());
       }
       const animate = () => {
@@ -244,8 +291,10 @@ export class ExplosionView {
         for (const [mesh, target] of targets) {
           const start = startPositions.get(mesh);
           const current = new THREE.Vector3().lerpVectors(start, target, eased);
+          const prev = this.explodedPositions.get(mesh);
+          const worldOffset = current.clone().sub(prev);
+          this._applyWorldOffset(mesh, worldOffset);
           this.explodedPositions.set(mesh, current.clone());
-          mesh.position.copy(current);
         }
         if (t < 1) requestAnimationFrame(animate);
         else resolve();
@@ -357,6 +406,8 @@ export class ExplosionView {
   clearThrustLines() {
     for (const line of this._thrustLines) {
       this.scene.remove(line);
+      if (line.geometry) line.geometry.dispose();
+      if (line.material) line.material.dispose();
     }
     this._thrustLines = [];
     this._thrustVisible = false;
@@ -378,6 +429,8 @@ export class ExplosionView {
   _clearPathLines() {
     for (const line of this._pathLines) {
       this.scene.remove(line);
+      if (line.geometry) line.geometry.dispose();
+      if (line.material) line.material.dispose();
     }
     this._pathLines = [];
   }
@@ -450,6 +503,8 @@ export class ExplosionView {
     for (const mesh of meshes) {
       if (this._isFixedMesh(mesh)) continue;
       if (!mesh.material) continue;
+      // Save material state before mutating
+      this._saveMaterialState(mesh);
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       startOpacities.set(mesh, mats.map(m => m.opacity));
       for (const mat of mats) {
@@ -493,6 +548,7 @@ export class ExplosionView {
       this._removedMeshes.set(mesh, {
         parent: parent,
         position: origPos ? origPos.clone() : mesh.position.clone(),
+        localPosition: mesh.position.clone(),
         opacity: savedOpacity !== undefined ? savedOpacity : 1.0,
         transparent: this._getMeshTransparent(mesh),
         depthWrite: this._getMeshDepthWrite(mesh),
@@ -613,18 +669,35 @@ export class ExplosionView {
 
   restoreAll() {
     for (const [mesh, info] of this._removedMeshes) {
-      info.parent.add(mesh);
-      mesh.position.copy(info.position);
+      if (info.parent && info.parent.add) {
+        info.parent.add(mesh);
+      } else {
+        this.scene.add(mesh);
+      }
+      const origLocal = this.originalLocalPositions.get(mesh);
+      mesh.position.copy(origLocal || info.localPosition || info.position);
       this.explodedPositions.set(mesh, info.position.clone());
       mesh.visible = true;
-      this._setMeshOpacity(mesh, info.opacity, info.transparent);
-      if (info.depthWrite !== undefined && mesh.material) {
-        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-        for (const mat of mats) { mat.depthWrite = info.depthWrite; }
+      // Prefer snapshot if present
+      if (this._matSnapshot.has(mesh)) {
+        this._restoreMaterialState(mesh);
+      } else if (mesh.material) {
+        this._setMeshOpacity(mesh, info.opacity, info.transparent);
+        if (info.depthWrite !== undefined) {
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          for (const mat of mats) { mat.depthWrite = info.depthWrite; }
+        }
       }
     }
     this._removedMeshes.clear();
     this._clearPathLines();
+    this.clearThrustLines();
+    for (const [mesh, pos] of this.originalPositions) {
+      if (this._isFixedMesh(mesh)) continue;
+      const origLocal = this.originalLocalPositions.get(mesh);
+      if (origLocal) mesh.position.copy(origLocal);
+      this.explodedPositions.set(mesh, pos.clone());
+    }
     this._disassembling = false;
     this._disassembleStage = 0;
     this.isExploded = false;

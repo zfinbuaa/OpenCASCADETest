@@ -9,6 +9,8 @@ Supports multi-level AP214 assemblies with NEXT_ASSEMBLY_USAGE_OCCURRENCE,
 PRODUCT_DEFINITION, and TRANSFORMATION data.
 """
 
+import logging
+
 import numpy as np
 from OCC.Core.XCAFDoc import (
     XCAFDoc_DocumentTool,
@@ -26,19 +28,34 @@ try:
 except ImportError:
     from OCC.Core.XCAFDoc import XCAFDoc_ColorGen as XCAFDoc_ColorSurf
 
+logger = logging.getLogger(__name__)
+
 
 def get_shape_name(label, shape_tool):
-    """Get the name of a shape label. Uses TDataStd_Name for 7.8 compatibility."""
+    """Get the name of a shape label using TDataStd_Name API."""
     try:
         name_attr = TDataStd_Name()
         if label.FindAttribute(TDataStd_Name.GetID(), name_attr):
+            try:
+                from OCC.Core.TCollection import TCollection_AsciiString
+                ext_str = name_attr.Get()
+                ascii_str = TCollection_AsciiString(ext_str)
+                s = ascii_str.ToCString()
+                if s:
+                    return s
+            except (ImportError, Exception):
+                pass
+            # Fallback: parse Dump output (for older OCCT versions)
             dump_output = name_attr.Dump()
             if isinstance(dump_output, tuple) and len(dump_output) >= 2:
                 s = str(dump_output[1])
                 if "Name=|" in s:
-                    start = s.index("Name=|") + 6
-                    end = s.index("|", start)
-                    return s[start:end]
+                    try:
+                        start = s.index("Name=|") + 6
+                        end = s.index("|", start)
+                        return s[start:end]
+                    except ValueError:
+                        pass
     except Exception:
         pass
     return "Part_{}".format(label.Tag())
@@ -151,8 +168,11 @@ def extract_assembly_tree(doc):
         }
 
         if color_tool.IsSet(label, XCAFDoc_ColorSurf):
-            c = color_tool.GetColor(label, XCAFDoc_ColorSurf)
-            node["color"] = [c.Red(), c.Green(), c.Blue()]
+            try:
+                c = color_tool.GetColor(label, XCAFDoc_ColorSurf)
+                node["color"] = [c.Red(), c.Green(), c.Blue()]
+            except Exception:
+                pass
 
         if has_children:
             child_seq = TDF_LabelSequence()
@@ -294,6 +314,69 @@ def filter_parts_by_ancestor(parts, root_name):
     if not root_name:
         return parts
     return [p for p in parts if root_name in p.get("ancestors", [])]
+
+
+def find_sub_assembly_by_code_and_name(roots, code, target_name):
+    """
+    Find a sub-assembly node by code+name pattern matching.
+
+    Part names in the STEP assembly tree are expected to follow the format:
+        {code}-{version}-{target_name}
+
+    e.g. ABC123-V2.0-A前保险杠
+
+    This function searches the assembly tree for a node whose name matches
+    the regex: ^{code}-.*-{target_name}$
+
+    If target_name is empty, matches any node whose name starts with {code}.
+
+    Args:
+        roots: list of root assembly nodes from extract_assembly_tree().
+        code: J-column value (part code, the prefix of the name pattern).
+        target_name: H-column value (part name, the suffix of the name pattern).
+
+    Returns:
+        tuple: (matched_part_names, target_node_name)
+            matched_part_names: set of leaf part names under the matched node.
+            target_node_name: name of the matched assembly node (or None).
+    """
+    import re
+
+    escaped_code = re.escape(code) if code else ""
+
+    if target_name and code:
+        escaped_name = re.escape(target_name)
+        pattern = re.compile(
+            r'^{}-.*-{}$'.format(escaped_code, escaped_name))
+    elif code:
+        pattern = re.compile(r'^{}'.format(escaped_code))
+    else:
+        return set(), None
+
+    def _collect_leaf_names(node, out_set):
+        if node.get("is_leaf"):
+            out_set.add(node["name"])
+        for child in node.get("children", []):
+            _collect_leaf_names(child, out_set)
+
+    def _search(node):
+        node_name = node.get("name", "")
+        if pattern.match(node_name):
+            matched = set()
+            _collect_leaf_names(node, matched)
+            return matched, node_name
+        for child in node.get("children", []):
+            result = _search(child)
+            if result[0]:
+                return result
+        return set(), None
+
+    for root in roots:
+        result = _search(root)
+        if result[0]:
+            return result
+
+    return set(), None
 
 
 def get_tree_stats(roots):

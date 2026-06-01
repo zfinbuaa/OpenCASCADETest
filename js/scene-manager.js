@@ -3,7 +3,7 @@
  * resize handling, background, and standard view presets.
  */
 
-import * as THREE from 'three';
+import * as THREE from '../node_modules/three/build/three.module.js';
 import { OrbitControls } from './three-addons/controls/OrbitControls.js';
 
 export class SceneManager {
@@ -110,7 +110,6 @@ export class SceneManager {
     const dir = new THREE.Vector3(dx, dy, dz).normalize();
     this.camera.position.copy(this._sceneCenter).add(dir.multiplyScalar(dist));
     this.controls.target.copy(this._sceneCenter);
-    this.camera.up.set(0, 1, 0);
     this.controls.update();
   }
 

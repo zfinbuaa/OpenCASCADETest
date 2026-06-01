@@ -6,6 +6,7 @@ Contains part list, hierarchy tree, groups, and disassembly stages.
 """
 
 import json
+import os
 
 
 def build_hierarchy(roots):
@@ -120,7 +121,7 @@ def build_assembly_json(parts, stages, source_file, contacts=None,
     hierarchy = build_hierarchy(roots) if roots else []
 
     result = {
-        "name": source_file.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].replace(".stp", "").replace(".step", ""),
+        "name": os.path.splitext(os.path.basename(source_file))[0],
         "sourceFile": source_file,
         "parts": part_entries,
         "hierarchy": hierarchy,
@@ -160,7 +161,7 @@ def build_part_entry(part, index):
     if part.get("direction"):
         entry["direction"] = part["direction"]
 
-    if part.get("directionConfidence"):
+    if part.get("directionConfidence") is not None:
         entry["directionConfidence"] = part["directionConfidence"]
 
     if part.get("color"):
@@ -168,6 +169,12 @@ def build_part_entry(part, index):
 
     if part.get("parent"):
         entry["parent"] = part["parent"]
+
+    if part.get("transform"):
+        entry["transform"] = part["transform"]
+
+    if part.get("bomSource"):
+        entry["bomSource"] = part["bomSource"]
 
     return entry
 

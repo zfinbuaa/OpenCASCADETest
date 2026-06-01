@@ -8,6 +8,7 @@ Includes direction search and AABB-level fast pre-filtering.
 Falls back to the BRep boolean method when mesh data is unavailable.
 """
 
+import logging
 import sys
 import os
 import numpy as np
@@ -21,6 +22,9 @@ from OCC.Core.Bnd import Bnd_Box
 from OCC.Core.BRepBndLib import brepbndlib
 
 from pipeline.direction_calc import CANDIDATE_DIRS
+from pipeline._occ_lock import OCC_BREP_LOCK
+
+logger = logging.getLogger(__name__)
 
 
 def _shape_to_mesh_arrays(shape, linear_deflection=1.0):
@@ -301,6 +305,35 @@ def check_disassembly_path(part_name, part_shape, other_shapes, direction,
         max_distance, steps)
 
 
+def _translate_aabb_tree(node, offset):
+    """Return a shallow clone of the AABB tree with all bboxes translated by offset."""
+    if node is None:
+        return None
+    new_node = _AABBNode()
+    new_node.min_v = node.min_v + offset
+    new_node.max_v = node.max_v + offset
+    new_node.is_leaf = node.is_leaf
+    new_node.tri_indices = node.tri_indices
+    if not node.is_leaf:
+        new_node.left = _translate_aabb_tree(node.left, offset)
+        new_node.right = _translate_aabb_tree(node.right, offset)
+    return new_node
+
+
+def _safe_coarse_step_size(part_aabb, obstacle_aabbs):
+    min_extent = min(
+        part_aabb[3] - part_aabb[0],
+        part_aabb[4] - part_aabb[1],
+        part_aabb[5] - part_aabb[2]
+    )
+    for ob in obstacle_aabbs:
+        for lo, hi in [(ob[0], ob[3]), (ob[1], ob[4]), (ob[2], ob[5])]:
+            e = hi - lo
+            if e > 0:
+                min_extent = min(min_extent, e)
+    return max(0.5, min_extent * 0.5)
+
+
 def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
                      max_distance, steps, collision_data):
     """Mesh-based collision check with AABB pre-filter and binary search."""
@@ -320,19 +353,43 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
             obs_data_list.append((other_name, od.vertices, od.triangles,
                                   od.tree, od.aabb_min, od.aabb_max, other_shape))
 
-    coarse_steps = max(5, steps // 4)
-    step_size = max_distance / coarse_steps
+    base_tree = part_data.tree
+    base_aabb_min = part_data.aabb_min
+    base_aabb_max = part_data.aabb_max
+    base_verts = part_data.vertices
+
+    coarse_steps = max(3, steps // 5)
+
+    part_aabb = (
+        float(base_aabb_min[0]), float(base_aabb_min[1]), float(base_aabb_min[2]),
+        float(base_aabb_max[0]), float(base_aabb_max[1]), float(base_aabb_max[2]),
+    )
+    obstacle_aabbs = []
+    for _, obs_v, obs_t, obs_tree, obs_amin, obs_amax, obs_shape in obs_data_list:
+        if obs_amin is not None and obs_amax is not None:
+            obstacle_aabbs.append((
+                float(obs_amin[0]), float(obs_amin[1]), float(obs_amin[2]),
+                float(obs_amax[0]), float(obs_amax[1]), float(obs_amax[2]),
+            ))
+    safe_step = _safe_coarse_step_size(part_aabb, obstacle_aabbs)
+    coarse_step_size = max_distance / max(coarse_steps, 1)
+    if coarse_step_size > safe_step:
+        coarse_step_size = safe_step
+        coarse_steps = max(1, int(np.ceil(max_distance / coarse_step_size)))
+    step_size = coarse_step_size
 
     collision_step = -1
     collision_name = None
+    last_safe_step = 0
 
     for step in range(1, coarse_steps + 1):
         dist = step * step_size
         offset = dir_np * dist
 
-        moved_verts = part_data.vertices + offset
-        moved_tree = _build_aabb_tree(moved_verts, part_data.triangles)
-        moved_aabb_min, moved_aabb_max = _compute_aabb_np(moved_verts)
+        moved_verts = base_verts + offset
+        moved_tree = _translate_aabb_tree(base_tree, offset)
+        moved_aabb_min = base_aabb_min + offset
+        moved_aabb_max = base_aabb_max + offset
 
         for other_name, obs_v, obs_t, obs_tree, obs_amin, obs_amax, obs_shape in obs_data_list:
             if obs_tree is not None and obs_amin is not None:
@@ -344,36 +401,88 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
                     collision_name = other_name
                     break
             else:
-                vec = gp_Vec(dir_np[0] * dist, dir_np[1] * dist, dir_np[2] * dist)
-                trsf = gp_Trsf()
-                trsf.SetTranslation(vec)
-                moved_shape = BRepBuilderAPI_Transform(part_shape, trsf).Shape()
-                if _has_interference_brep(moved_shape, obs_shape, part_data.volume):
+                with OCC_BREP_LOCK:
+                    vec = gp_Vec(dir_np[0] * dist, dir_np[1] * dist, dir_np[2] * dist)
+                    trsf = gp_Trsf()
+                    trsf.SetTranslation(vec)
+                    moved_shape = BRepBuilderAPI_Transform(part_shape, trsf).Shape()
+                    interferes = _has_interference_brep(moved_shape, obs_shape, part_data.volume)
+                if interferes:
                     collision_step = step
                     collision_name = other_name
                     break
 
         if collision_step > 0:
             break
+        last_safe_step = step
 
     if collision_step < 0:
+        lo = last_safe_step * step_size
+        hi = max_distance
+        final_hit = False
+        final_name = None
+        for _ in range(5):
+            mid = (lo + hi) / 2.0
+            offset = dir_np * mid
+            moved_verts = base_verts + offset
+            moved_tree = _translate_aabb_tree(base_tree, offset)
+            moved_aabb_min = base_aabb_min + offset
+            moved_aabb_max = base_aabb_max + offset
+
+            hit = False
+            for other_name, obs_v, obs_t, obs_tree, obs_amin, obs_amax, obs_shape in obs_data_list:
+                if obs_tree is not None and obs_amin is not None:
+                    if _check_mesh_intersection(moved_verts, part_data.triangles,
+                                                moved_tree, moved_aabb_min, moved_aabb_max,
+                                                obs_v, obs_t, obs_tree,
+                                                obs_amin, obs_amax):
+                        hit = True
+                        final_name = other_name
+                        break
+                else:
+                    with OCC_BREP_LOCK:
+                        vec = gp_Vec(dir_np[0] * mid, dir_np[1] * mid, dir_np[2] * mid)
+                        trsf = gp_Trsf()
+                        trsf.SetTranslation(vec)
+                        moved_shape = BRepBuilderAPI_Transform(part_shape, trsf).Shape()
+                        interferes = _has_interference_brep(moved_shape, obs_shape, part_data.volume)
+                    if interferes:
+                        hit = True
+                        final_name = other_name
+                        break
+
+            if hit:
+                hi = mid
+                final_hit = True
+            else:
+                lo = mid
+
+        if not final_hit:
+            return {
+                "feasible": True,
+                "max_safe_distance": max_distance,
+                "collision_at_step": -1,
+                "collision_with": None,
+                "total_steps": steps,
+            }
         return {
-            "feasible": True,
-            "max_safe_distance": max_distance,
+            "feasible": False,
+            "max_safe_distance": lo,
             "collision_at_step": -1,
-            "collision_with": None,
+            "collision_with": final_name,
             "total_steps": steps,
         }
 
     lo = (collision_step - 1) * step_size
     hi = collision_step * step_size
 
-    for _ in range(8):
+    for _ in range(5):
         mid = (lo + hi) / 2.0
         offset = dir_np * mid
-        moved_verts = part_data.vertices + offset
-        moved_tree = _build_aabb_tree(moved_verts, part_data.triangles)
-        moved_aabb_min, moved_aabb_max = _compute_aabb_np(moved_verts)
+        moved_verts = base_verts + offset
+        moved_tree = _translate_aabb_tree(base_tree, offset)
+        moved_aabb_min = base_aabb_min + offset
+        moved_aabb_max = base_aabb_max + offset
 
         hit = False
         for other_name, obs_v, obs_t, obs_tree, obs_amin, obs_amax, obs_shape in obs_data_list:
@@ -385,11 +494,13 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
                     hit = True
                     break
             else:
-                vec = gp_Vec(dir_np[0] * mid, dir_np[1] * mid, dir_np[2] * mid)
-                trsf = gp_Trsf()
-                trsf.SetTranslation(vec)
-                moved_shape = BRepBuilderAPI_Transform(part_shape, trsf).Shape()
-                if _has_interference_brep(moved_shape, obs_shape, part_data.volume):
+                with OCC_BREP_LOCK:
+                    vec = gp_Vec(dir_np[0] * mid, dir_np[1] * mid, dir_np[2] * mid)
+                    trsf = gp_Trsf()
+                    trsf.SetTranslation(vec)
+                    moved_shape = BRepBuilderAPI_Transform(part_shape, trsf).Shape()
+                    interferes = _has_interference_brep(moved_shape, obs_shape, part_data.volume)
+                if interferes:
                     hit = True
                     break
 
@@ -419,14 +530,17 @@ def _check_path_brep(part_shape, other_shapes, direction,
                      direction[2] * dist)
         transform = gp_Trsf()
         transform.SetTranslation(vec)
-        moved_shape = BRepBuilderAPI_Transform(part_shape, transform).Shape()
+        with OCC_BREP_LOCK:
+            moved_shape = BRepBuilderAPI_Transform(part_shape, transform).Shape()
 
         vol_moved = _compute_volume(moved_shape)
         if vol_moved is None:
             continue
 
         for other_name, other_shape in other_shapes:
-            if _has_interference_brep(moved_shape, other_shape, vol_moved):
+            with OCC_BREP_LOCK:
+                interferes = _has_interference_brep(moved_shape, other_shape, vol_moved)
+            if interferes:
                 safe_dist = (step - 1) * step_size
                 return {
                     "feasible": False,
@@ -521,9 +635,10 @@ def find_best_feasible_direction(part_name, part_shape, obstacle_shapes,
         best_result = {
             "feasible": False,
             "max_safe_distance": 0.0,
-            "collision_at_step": 1,
+            "collision_at_step": None,
             "collision_with": None,
             "total_steps": 20,
+            "reason": "no candidate succeeded",
         }
 
     return best_dir, best_result
@@ -558,13 +673,17 @@ def _collect_leaf_descendants(sa_name, sub_assemblies, part_map, result_set,
 
 def filter_obstacles_by_compound_bbox(part_name, part_shape, remaining_names,
                                       part_map, sub_assemblies, collision_data,
-                                      max_distance=500.0):
+                                      max_distance=500.0, sa_bbox_cache=None):
     """Filter obstacles using Compound-level Bnd_Box to exclude far-away groups.
 
     For each sub-assembly, merge AABBs of all descendant leaf parts into a
     compound-level bounding box. A compound whose AABB does not overlap the
     target part's expanded AABB can have all its leaf parts skipped,
     dramatically reducing the obstacle count for collision checking.
+
+    Args:
+        sa_bbox_cache: precomputed dict[sa_name -> (bmin, bmax)].
+                       If provided, avoids rebuilding compound bboxes.
     """
     if not sub_assemblies or len(remaining_names) < 50:
         return [(n, part_map[n]["shape"]) for n in remaining_names if n != part_name]
@@ -575,6 +694,64 @@ def filter_obstacles_by_compound_bbox(part_name, part_shape, remaining_names,
 
     expanded_min = part_data.aabb_min - max_distance
     expanded_max = part_data.aabb_max + max_distance
+
+    if sa_bbox_cache is not None:
+        sa_leaves = sa_bbox_cache["_leaves"]
+        sa_bbox = sa_bbox_cache["_bbox"]
+        all_known = sa_bbox_cache["_all_known"]
+    else:
+        memo = {}
+        sa_leaves = {}
+        all_known = set()
+        sa_bbox = {}
+
+        for sa in sub_assemblies:
+            sa_name = sa["name"]
+            leaves = set()
+            _collect_leaf_descendants(sa_name, sub_assemblies, part_map,
+                                      leaves, memo)
+            sa_leaves[sa_name] = leaves
+            all_known.update(leaves)
+
+            bmin = None
+            bmax = None
+            for leaf_name in leaves:
+                cd = collision_data.get(leaf_name)
+                if cd is not None and cd.aabb_min is not None:
+                    if bmin is None:
+                        bmin = cd.aabb_min.copy()
+                        bmax = cd.aabb_max.copy()
+                    else:
+                        bmin = np.minimum(bmin, cd.aabb_min)
+                        bmax = np.maximum(bmax, cd.aabb_max)
+            if bmin is not None:
+                sa_bbox[sa_name] = (bmin, bmax)
+
+    if not sa_bbox:
+        return [(n, part_map[n]["shape"]) for n in remaining_names if n != part_name]
+
+    remaining_set = set(remaining_names)
+    remaining_set.discard(part_name)
+
+    filtered = set()
+    for sa_name, (bmin, bmax) in sa_bbox.items():
+        if _aabb_overlap_np(expanded_min, expanded_max, bmin, bmax):
+            filtered.update(remaining_set & sa_leaves.get(sa_name, set()))
+
+    for n in remaining_set - all_known:
+        filtered.add(n)
+
+    return [(n, part_map[n]["shape"]) for n in filtered]
+
+
+def precompute_compound_bbox_cache(sub_assemblies, part_map, collision_data):
+    """Precompute compound-level bounding boxes for fast obstacle filtering.
+
+    Returns a dict to pass as sa_bbox_cache to filter_obstacles_by_compound_bbox,
+    or None if sub_assemblies is empty.
+    """
+    if not sub_assemblies:
+        return None
 
     memo = {}
     sa_leaves = {}
@@ -603,21 +780,11 @@ def filter_obstacles_by_compound_bbox(part_name, part_shape, remaining_names,
         if bmin is not None:
             sa_bbox[sa_name] = (bmin, bmax)
 
-    if not sa_bbox:
-        return [(n, part_map[n]["shape"]) for n in remaining_names if n != part_name]
-
-    remaining_set = set(remaining_names)
-    remaining_set.discard(part_name)
-
-    filtered = set()
-    for sa_name, (bmin, bmax) in sa_bbox.items():
-        if _aabb_overlap_np(expanded_min, expanded_max, bmin, bmax):
-            filtered.update(remaining_set & sa_leaves.get(sa_name, set()))
-
-    for n in remaining_set - all_known:
-        filtered.add(n)
-
-    return [(n, part_map[n]["shape"]) for n in filtered]
+    return {
+        "_leaves": sa_leaves,
+        "_bbox": sa_bbox,
+        "_all_known": all_known,
+    }
 
 
 def check_obstacle_set(part_shape, obstacle_set, direction,

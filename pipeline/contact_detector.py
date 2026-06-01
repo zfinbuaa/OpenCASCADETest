@@ -6,12 +6,15 @@ then ThreadPoolExecutor-parallel BRepExtrema for fast multi-core contact
 detection on large assemblies.
 """
 
+import logging
 import sys
 import os
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from OCC.Core.Bnd import Bnd_Box
 from OCC.Core.BRepBndLib import brepbndlib
+
+logger = logging.getLogger(__name__)
 
 
 CONTACT_THRESHOLD = 0.1
@@ -67,12 +70,8 @@ def _estimate_contact_area(contact_points, normals):
     on the best-fit plane.
     """
     if len(contact_points) < 3:
-        if len(contact_points) == 2:
-            p1 = np.array(contact_points[0])
-            p2 = np.array(contact_points[1])
-            return float(np.linalg.norm(p2 - p1) * 0.5)
-        elif len(contact_points) == 1:
-            return 0.5
+        # Fewer than 3 points cannot form an area; return 0.0 instead of
+        # invented values (previously used 0.5 or length/2 as placeholders).
         return 0.0
 
     pts = np.array(contact_points)
@@ -259,6 +258,15 @@ def _check_pairs_parallel(pairs, cd_list, max_workers=None):
 
         processed = 0
         for future in as_completed(futures):
+            try:
+                from pipeline import is_cancelled
+                if is_cancelled():
+                    logger.warning("contact detection cancelled by user signal")
+                    for f in futures:
+                        f.cancel()
+                    break
+            except Exception:
+                pass
             i, j, idx = futures[future]
             processed += 1
             if processed % 50 == 0 or processed == total:
@@ -268,8 +276,8 @@ def _check_pairs_parallel(pairs, cd_list, max_workers=None):
                 result = future.result(timeout=300)
                 if result is not None:
                     results.append((i, j, result))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("contact check failed for pair: %s", e)
 
     sys.stdout.write("\n")
     sys.stdout.flush()
@@ -339,12 +347,11 @@ def detect_contacts(parts, progress_callback=None, intra_parent_only=False,
             if local_cd:
                 tight_pairs = []
                 for i, j in candidate_pairs:
-                    if _aabb_overlap_local(
-                        local_cd[i].aabb_min - CONTACT_THRESHOLD,
-                        local_cd[i].aabb_max + CONTACT_THRESHOLD,
-                        local_cd[j].aabb_min - CONTACT_THRESHOLD,
-                        local_cd[j].aabb_max + CONTACT_THRESHOLD
-                    ) if local_cd[i] and local_cd[j] and local_cd[i].tree and local_cd[j].tree else True:
+                    has_local = (local_cd is not None and i in local_cd and j in local_cd
+                                 and local_cd[i] is not None and local_cd[j] is not None
+                                 and local_cd[i].tree is not None and local_cd[j].tree is not None)
+                    overlap_ok = (not has_local) or _aabb_overlap_local(local_cd[i], local_cd[j])
+                    if overlap_ok:
                         tight_pairs.append((i, j))
                 total_tight += len(tight_pairs)
             else:
@@ -446,69 +453,14 @@ def detect_contacts(parts, progress_callback=None, intra_parent_only=False,
     sys.stdout.flush()
     return contacts
 
-    # ── Default: global all-pairs check ──
-    contacts = []
-    aabbs = [_compute_aabb(part["shape"]) for part in parts]
-    obbs = [_compute_obb(part["shape"]) for part in parts]
-
-    candidate_pairs = _find_overlap_pairs(aabbs)
-    total_pairs = len(candidate_pairs)
-
-    sys.stdout.write("  {} candidate pairs after AABB filter (of {} total)\n".format(
-        total_pairs, n * (n - 1) // 2))
-    sys.stdout.flush()
-
-    done = 0
-    aabb_only_count = 0
-
-    for i, j in sorted(candidate_pairs):
-        if obbs and obbs[i] is not None and obbs[j] is not None:
-            if not _obb_overlap_part(obbs[i], obbs[j]):
-                continue
-
-        aabb_only_count += 1
-        shape_a = parts[i]["shape"]
-        name_a = parts[i]["name"]
-        shape_b = parts[j]["shape"]
-        name_b = parts[j]["name"]
-
-        done += 1
-        if done % 20 == 0 or done == total_pairs:
-            msg = "    pair {}/{}: {} <-> {}{}".format(
-                done, total_pairs, name_a, name_b,
-                " ..." if done < total_pairs else " done")
-            sys.stdout.write("\r" + msg)
-            sys.stdout.flush()
-            if progress_callback:
-                progress_callback(done, total_pairs,
-                                  "{} <-> {}".format(name_a, name_b))
-
-        result = _check_pair_contact(shape_a, shape_b)
-        if result is None:
-            continue
-
-        min_dist, contact_points, normals = result
-        avg_normal = _compute_avg_normal(normals)
-        contact_area = _estimate_contact_area(contact_points, normals)
-
-        contacts.append({
-            "partA": name_a,
-            "partB": name_b,
-            "contactPoints": contact_points,
-            "avgNormal": avg_normal,
-            "minDistance": min_dist,
-            "contactArea": contact_area,
-        })
-
-    sys.stdout.write("\n  {} OBB-filtered pairs checked\n".format(aabb_only_count))
-    sys.stdout.flush()
-    return contacts
-
 
 def _compute_avg_normal(normals):
     """Compute average normal from a list of normals."""
     avg_normal = np.mean(normals, axis=0).tolist()
     length = (avg_normal[0] ** 2 + avg_normal[1] ** 2 + avg_normal[2] ** 2) ** 0.5
+    if length < 1e-9:
+        logger.warning("_compute_avg_normal produced zero vector")
+        return np.array([0.0, 1.0, 0.0])
     if length > 1e-10:
         return [avg_normal[0] / length,
                 avg_normal[1] / length,

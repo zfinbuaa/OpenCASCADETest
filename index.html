@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: file:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: local:; connect-src 'self' blob: local:; object-src 'none'; base-uri 'self'; frame-ancestors 'none';">
 <title>数模自动拆装工具</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -101,6 +101,9 @@
   .tree-children { margin-left: 0; }
   .tree-children.collapsed { display: none; }
   .tree-node .badge.fixed { background: #e67e22; color: #fff; }
+  .tree-node .eye-icon { width:16px;text-align:center;flex-shrink:0;cursor:pointer;
+    user-select:none;font-size:10px;color:#889;margin:0 2px; }
+  .tree-node .eye-icon:hover { color:#1e90ff; }
 </style>
 </head>
 <body>
@@ -114,7 +117,7 @@
 
   <div id="main-area">
     <div id="viewport">
-      <div id="status-bar">就绪 — Ctrl+O 加载数据 | Ctrl+I 导入 STP 预览</div>
+      <div id="status-bar">就绪 — Ctrl+B 加载BOM | Ctrl+O 加载JSON</div>
     </div>
 
     <div id="panel">
@@ -125,15 +128,6 @@
     </div>
   </div>
 </div>
-
-<script type="importmap">
-{
-  "imports": {
-    "three": "./node_modules/three/build/three.module.js",
-    "three/addons/": "./node_modules/three/examples/jsm/"
-  }
-}
-</script>
 
 <script type="module" src="js/main.js"></script>
 </body>

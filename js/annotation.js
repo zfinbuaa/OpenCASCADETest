@@ -4,7 +4,7 @@
  * 左右双列布局：标签数量左右均衡（奇数时左侧多一个），
  * 引线为水平直线，圆圈为白底黑字黑圈。
  */
-import * as THREE from 'three';
+import * as THREE from '../node_modules/three/build/three.module.js';
 
 const CIRCLE_R = 12;          // 圆圈半径
 const COLUMN_MARGIN = 60;     // 左右列距离视口边缘
@@ -25,26 +25,61 @@ export class Annotation {
     this._canvas.style.pointerEvents = 'none';
     this._canvas.style.zIndex = '5';
     this._ctx = this._canvas.getContext('2d');
+    this._hiddenPartIds = new Set();
   }
 
-  setParts(parts) {
-    this.annotations = parts.map((p, i) => ({
-      partId: p.id || p.name,
-      partName: p.name || p.id,
-      worldPos: new THREE.Vector3(),
-      index: i,
-    }));
+  setHiddenPartIds(ids) {
+    this._hiddenPartIds = ids instanceof Set ? ids : new Set(ids || []);
+  }
+
+  setParts(parts, mergedPartIds = null) {
+    if (mergedPartIds && mergedPartIds instanceof Set && mergedPartIds.size > 0) {
+      this.annotations = [{
+        partId: '__merged__',
+        partName: '[编组]',
+        worldPos: new THREE.Vector3(),
+        index: 0,
+        _mergedIds: new Set(mergedPartIds),
+      }];
+    } else {
+      this.annotations = parts.map((p, i) => ({
+        partId: p.id || p.name,
+        partName: p.name || p.id,
+        worldPos: new THREE.Vector3(),
+        index: i,
+      }));
+    }
   }
 
   updatePositions() {
     if (!this.annotations) return;
     for (const ann of this.annotations) {
-      const mesh = this._findMesh(ann.partId);
-      if (mesh) {
-        const box = new THREE.Box3().setFromObject(mesh);
+      if (ann._mergedIds) {
+        const box = new THREE.Box3();
+        for (const mesh of this._allMeshes()) {
+          if (ann._mergedIds.has(mesh.userData.partId) && mesh.visible) {
+            box.expandByObject(mesh);
+          }
+        }
+        if (box.isEmpty()) continue;
         box.getCenter(ann.worldPos);
+      } else {
+        if (this._hiddenPartIds.has(ann.partId)) continue;
+        const mesh = this._findMesh(ann.partId);
+        if (mesh && mesh.visible) {
+          const box = new THREE.Box3().setFromObject(mesh);
+          box.getCenter(ann.worldPos);
+        }
       }
     }
+  }
+
+  _allMeshes() {
+    const meshes = [];
+    this.scene.traverse((child) => {
+      if (child.isMesh) meshes.push(child);
+    });
+    return meshes;
   }
 
   draw() {
