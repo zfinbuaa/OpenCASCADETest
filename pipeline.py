@@ -516,6 +516,8 @@ def _run_bom_preview(args):
             if not p["name"].startswith(code + "_"):
                 p["name"] = "{}_{:04d}__{}".format(code, i, p["name"].split("__", 1)[-1] if "__" in p["name"] else p["name"])
 
+        _prefix_hierarchy_roots(roots, "{}_{:04d}__".format(code, i))
+
         all_parts.extend(sub_parts)
         all_roots.extend(roots)
 
@@ -609,7 +611,7 @@ def _run_bom_full(args):
                 log("    loading ALL {} parts from STP".format(len(all_sub_parts)))
                 sub_parts = all_sub_parts
         else:
-            sub_parts = all_sub_parts
+                sub_parts = all_sub_parts
 
         for p in sub_parts:
             p["name"] = "{}_{:04d}__{}".format(code, i, p["name"])
@@ -626,6 +628,8 @@ def _run_bom_full(args):
                 p["bomSource"] = bom_info
             if not p["name"].startswith(code + "_"):
                 p["name"] = "{}_{:04d}__{}".format(code, i, p["name"].split("__", 1)[-1] if "__" in p["name"] else p["name"])
+
+        _prefix_hierarchy_roots(roots, "{}_{:04d}__".format(code, i))
 
         all_parts.extend(sub_parts)
         all_roots.extend(roots)
@@ -645,90 +649,126 @@ def _run_bom_full(args):
 
     log("  Total: {} parts".format(len(all_parts)))
 
-    # Pre-compute collision data
-    log("  Pre-computing mesh collision data...")
-    t_mesh = time.time()
-    collision_data = prepare_collision_data(all_parts)
-    log("  {} meshes ready ({:.1f}s)".format(
-        len(collision_data), time.time() - t_mesh))
-
-    flat_parts, sub_assemblies = list(all_parts), []
-    for p in all_parts:
-        # Force parent to BOM name to ensure contact detection groups by BOM
+    # ── Build BOM-grouped dag_parts (one compound shape per BOM entry) ──
+    flat_parts = list(all_parts)
+    for p in flat_parts:
         p["parent"] = p.get("bomSource", {}).get("name", "root")
 
-    # Rebuild sub_assemblies from BOM entries
     bom_groups = {}
     for p in all_parts:
         bs = p.get("bomSource", {})
         key = bs.get("name", "unknown")
         if key not in bom_groups:
-            bom_groups[key] = {
-                "name": key,
-                "child_names": [],
-                "depth": 0,
-                "centroid": None,
-                "ancestor_path": [key],
-            }
+            bom_groups[key] = {"name": key, "child_names": []}
         bom_groups[key]["child_names"].append(p["name"])
+
+    bom_group_map = {}
+    dag_parts = []
+    for key, group in bom_groups.items():
+        group_parts = [p for p in all_parts if p["name"] in group["child_names"]]
+        if not group_parts:
+            continue
+        merged_shape = _merge_parts_to_compound(group_parts)
+        dag_parts.append({
+            "name": key,
+            "shape": merged_shape,
+            "parent": "root",
+        })
+        bom_group_map[key] = group["child_names"]
+
+    log("  {} BOM units formed from {} leaf parts".format(
+        len(dag_parts), len(flat_parts)))
+
     sub_assemblies = list(bom_groups.values())
 
-    # Step: Contact detection
-    log("[4/7] Detecting contacts...")
+    # Pre-compute collision data for dag_parts
+    log("  Pre-computing mesh collision data...")
+    t_mesh = time.time()
+    dag_collision_data = prepare_collision_data(dag_parts)
+    log("  {} meshes ready ({:.1f}s)".format(
+        len(dag_collision_data), time.time() - t_mesh))
+
+    # Contact detection on dag_parts
+    log("[4/7] Detecting contacts (BOM-level)...")
     t0 = time.time()
-    contacts = detect_contacts(flat_parts, intra_parent_only=True,
-                               collision_data=collision_data, parallel=True)
+    contacts = detect_contacts(dag_parts, intra_parent_only=False,
+                               collision_data=dag_collision_data, parallel=True)
     log("  {} contact pairs ({:.1f}s)".format(len(contacts), time.time() - t0))
 
-    # Fastener identification
-    fasteners = identify_fasteners(flat_parts, contacts)
+    # Fastener identification on dag_parts
+    fasteners = identify_fasteners(dag_parts, contacts)
     if fasteners:
         log("  {} fasteners: {}".format(len(fasteners), ", ".join(fasteners[:10])))
     else:
         log("  No fasteners identified")
 
-    # Compute directions
+    # Compute directions on dag_parts
     log("[5/7] Computing outward directions...")
     t0 = time.time()
-    directions = compute_all_directions(flat_parts, contacts, sub_assemblies)
-    for part in flat_parts:
+    directions = compute_all_directions(dag_parts, contacts, sub_assemblies)
+    for part in dag_parts:
         part["direction"] = directions.get(part["name"], [0, 1, 0])
     log("  {} directions computed ({:.1f}s)".format(
         len(directions), time.time() - t0))
 
-    centroids = _compute_centroids(flat_parts)
-    assembly_centroid = _compute_assembly_centroid(flat_parts, centroids)
+    centroids = _compute_centroids(dag_parts)
+    assembly_centroid = _compute_assembly_centroid(dag_parts, centroids)
 
     if args.target_part:
         from pipeline.dependency_chain import compute_dependency_chain
-        log("[6/7] Computing dependency chain for target: {}".format(
-            args.target_part))
+        dag_target = None
+        for key in bom_group_map:
+            if args.target_part in bom_group_map[key] or args.target_part == key:
+                dag_target = key
+                break
+        if not dag_target:
+            dag_target = args.target_part
+        log("[6/7] Computing dependency chain for target: {}".format(dag_target))
         t0 = time.time()
         stages, verified_dirs, dist_mults, details = compute_dependency_chain(
-            flat_parts, directions, collision_data, args.target_part,
+            dag_parts, directions, dag_collision_data, dag_target,
             max_distance=args.explosion_distance,
             assembly_centroid=assembly_centroid,
             sub_assemblies=sub_assemblies)
         log("  {} stages in dependency chain ({:.1f}s)".format(
             len(stages), time.time() - t0))
     else:
-        log("[6/7] Building collision-driven disassembly plan...")
+        log("[6/7] Building collision-driven disassembly plan (BOM-level)...")
         t0 = time.time()
         stages, verified_dirs, dist_mults, details = build_disassembly_dag_v2(
-            flat_parts, directions, collision_data, fasteners,
+            dag_parts, directions, dag_collision_data, fasteners,
             max_distance=args.explosion_distance,
             assembly_centroid=assembly_centroid,
             sub_assemblies=sub_assemblies)
 
         feasible = sum(1 for d in details if d.get("feasible"))
         blocked = len(details) - feasible
-        log("  {} stages, {}/{} parts feasible ({:.1f}s)".format(
+        log("  {} BOM-unit stages, {}/{} units feasible ({:.1f}s)".format(
             len(stages), feasible, len(details), time.time() - t0))
+
+    # ── Map dag-part stages/directions back to individual leaf parts ──
+    dag_stage = {}
+    for s_idx, s_parts in enumerate(stages):
+        for name in s_parts:
+            dag_stage[name] = s_idx + 1
+
+    # Rebuild: one stage per BOM unit, containing all its leaf parts
+    stages_by_unit = [[] for _ in range(max(dag_stage.values()) if dag_stage else 0)]
+    for key, child_names in bom_group_map.items():
+        s = dag_stage.get(key, 1)
+        stages_by_unit[s - 1].extend(child_names)
+    stages = [s for s in stages_by_unit if s]
+
+    leaf_verified_dirs = {}
+    for key, child_names in bom_group_map.items():
+        if key in verified_dirs:
+            for name in child_names:
+                leaf_verified_dirs[name] = verified_dirs[key]
 
     for part in flat_parts:
         name = part["name"]
-        if name in verified_dirs:
-            part["direction"] = verified_dirs[name]
+        if name in leaf_verified_dirs:
+            part["direction"] = leaf_verified_dirs[name]
 
     # Write report
     report_lines = []
@@ -773,6 +813,26 @@ def _run_bom_full(args):
     log("Done in {:.1f}s. Output: {}".format(
         time.time() - t_total, args.output_dir))
     return 0
+
+
+def _merge_parts_to_compound(parts_list):
+    """Merge multiple part shapes into a single TopoDS_Compound for DAG."""
+    from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Builder
+    comp = TopoDS_Compound()
+    builder = TopoDS_Builder()
+    builder.MakeCompound(comp)
+    for p in parts_list:
+        shape = p.get("shape")
+        if shape is not None:
+            builder.Add(comp, shape)
+    return comp
+
+
+def _prefix_hierarchy_roots(roots, prefix):
+    """Recursively prefix node names in assembly tree roots for BOM uniqueness."""
+    for node in roots:
+        node["name"] = prefix + node.get("name", "")
+        _prefix_hierarchy_roots(node.get("children", []), prefix)
 
 
 if __name__ == "__main__":

@@ -73,10 +73,10 @@ export class TreeView {
 
   _renderNode(node, parentEl, depth) {
     const hasChildren = node.children && node.children.length > 0;
-    const isLeaf = !hasChildren && node.partIds && node.partIds.length === 1
-                   && node.id === node.partIds[0];
+    const isLeaf = !hasChildren && node.partIds && node.partIds.length === 1;
     const isFixed = this._isNodeFixed(node);
-    const part = this.partsMap[node.id];
+    const lookupId = (node.partIds && node.partIds.length > 0) ? node.partIds[0] : node.id;
+    const part = this.partsMap[lookupId] || this.partsMap[node.id];
     const stage = part ? (part.disassemblyStage || this.stagesMap[node.id]) : this.stagesMap[node.id];
     const isFastener = part ? part.isFastener : false;
     const nodePartIds = node.partIds || [];
@@ -149,17 +149,18 @@ export class TreeView {
       row.appendChild(fxb);
     }
 
-    if (isLeaf) {
+    if (node.partIds && node.partIds.length > 0) {
       const swatch = document.createElement('span');
       swatch.className = 'swatch';
-      const color = this._colorMap[node.id] || (part && part.color
+      const storedColor = this._colorMap[lookupId] || this._colorMap[node.partIds[0]];
+      const color = storedColor || (part && part.color
         ? '#' + ((1 << 24) + (Math.round(part.color[0]*255) << 16) + (Math.round(part.color[1]*255) << 8) + Math.round(part.color[2]*255)).toString(16).slice(1)
-        : '#bbbbbb');
+        : '#0080c0');
       swatch.style.backgroundColor = color;
-      swatch.title = '点击修改颜色';
+      swatch.title = '点击修改颜色' + (node.partIds.length > 1 && !isLeaf ? ' (含' + node.partIds.length + '子件)' : '');
       swatch.addEventListener('click', (e) => {
         e.stopPropagation();
-        this._showColorPicker(swatch, node.id);
+        this._showColorPicker(swatch, node);
       });
       row.appendChild(swatch);
     }
@@ -314,33 +315,93 @@ export class TreeView {
     this.build(this.hierarchy, Object.values(this.partsMap), []);
   }
 
-  _showColorPicker(swatch, partId) {
-    const input = document.createElement('input');
-    input.type = 'color';
-    input.value = this._colorMap[partId] || '#bbbbbb';
-    input.style.position = 'fixed';
-    input.style.opacity = '0';
-    document.body.appendChild(input);
-    input.click();
+  _showColorPicker(swatch, node) {
+    const existing = document.querySelector('.color-palette');
+    if (existing) existing.remove();
 
-    input.addEventListener('input', () => {
-      const v = input.value;
+    const lookupId = (node.partIds && node.partIds.length > 0) ? node.partIds[0] : node.id;
+    const presets = [
+      { label: '红', hex: '#ff0000', rgb: '255,0,0' },
+      { label: '绿', hex: '#008040', rgb: '0,128,64' },
+      { label: '橙', hex: '#ff8000', rgb: '255,128,0' },
+      { label: '蓝', hex: '#0080c0', rgb: '0,128,192' },
+      { label: '黄', hex: '#808000', rgb: '128,128,0' },
+      { label: '紫', hex: '#800080', rgb: '128,0,128' },
+    ];
+
+    const panel = document.createElement('div');
+    panel.className = 'color-palette';
+
+    const label = document.createElement('div');
+    label.textContent = '预设';
+    label.style.fontSize = '11px';
+    label.style.color = '#888';
+    label.style.marginBottom = '4px';
+    panel.appendChild(label);
+
+    const row = document.createElement('div');
+    row.style.display = 'flex';
+    row.style.flexWrap = 'wrap';
+    row.style.gap = '4px';
+
+    const _applyColor = (color) => {
+      const v = color;
       swatch.style.backgroundColor = v;
-      this._colorMap[partId] = v;
+      this._colorMap[lookupId] = v;
       if (this.callbacks.onColorChange) {
-        this.callbacks.onColorChange(partId, v);
+        const allIds = new Set();
+        this._collectPartIds(node, allIds);
+        this.callbacks.onColorChange([...allIds], v);
       }
-    });
+      panel.remove();
+      document.removeEventListener('click', _closeOnOutside, true);
+    };
 
-    input.addEventListener('change', () => {
-      document.body.removeChild(input);
-    });
+    for (const p of presets) {
+      const btn = document.createElement('span');
+      btn.className = 'color-preset';
+      btn.style.backgroundColor = p.hex;
+      btn.title = p.label + ' ' + p.hex;
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        _applyColor(p.hex);
+      });
+      row.appendChild(btn);
+    }
+    panel.appendChild(row);
 
-    input.addEventListener('blur', () => {
-      setTimeout(() => {
-        if (input.parentNode) document.body.removeChild(input);
-      }, 200);
+    const customBtn = document.createElement('div');
+    customBtn.className = 'color-custom';
+    customBtn.textContent = '自定义...';
+    customBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      panel.remove();
+      document.removeEventListener('click', _closeOnOutside, true);
+      const input = document.createElement('input');
+      input.type = 'color';
+      input.value = this._colorMap[lookupId] || '#0080c0';
+      input.style.position = 'fixed';
+      input.style.opacity = '0';
+      document.body.appendChild(input);
+      input.click();
+      input.addEventListener('input', () => _applyColor(input.value));
+      input.addEventListener('change', () => { if (input.parentNode) input.remove(); });
     });
+    panel.appendChild(customBtn);
+
+    document.body.appendChild(panel);
+
+    const swatchRect = swatch.getBoundingClientRect();
+    panel.style.left = Math.min(swatchRect.left, window.innerWidth - 200) + 'px';
+    panel.style.top = Math.min(swatchRect.bottom + 4, window.innerHeight - 180) + 'px';
+
+    const _closeOnOutside = (e) => {
+      if (!panel.contains(e.target) && e.target !== swatch) {
+        panel.remove();
+        document.removeEventListener('click', _closeOnOutside, true);
+      }
+    };
+    setTimeout(() => document.addEventListener('click', _closeOnOutside, true), 0);
   }
 
   getSelected() {

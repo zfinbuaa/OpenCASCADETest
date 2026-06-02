@@ -9,7 +9,7 @@ import json
 import os
 
 
-def build_hierarchy(roots):
+def build_hierarchy(roots, parts=None):
     """
     Build a hierarchical tree structure from extract_assembly_tree() output.
 
@@ -17,25 +17,36 @@ def build_hierarchy(roots):
 
     Args:
         roots: list of root nodes from extract_assembly_tree().
+        parts: (optional) list of part dicts for name mapping (BOM mode).
 
     Returns:
         list[dict]: Hierarchy tree for frontend tree view.
     """
+    name_map = {}
+    if parts:
+        for p in parts:
+            original = p.get("name", "").split("__", 1)[-1].replace(" ", "_")
+            prefixed = p.get("name", "").replace(" ", "_")
+            name_map[original] = prefixed
+
     result = []
     for root in roots:
-        result.append(_build_hierarchy_node(root))
+        result.append(_build_hierarchy_node(root, name_map))
     return result
 
 
-def _build_hierarchy_node(node):
+def _build_hierarchy_node(node, name_map=None):
     """Recursively convert an assembly tree node to a hierarchy JSON node."""
-    children = [_build_hierarchy_node(c) for c in node.get("children", [])]
+    if name_map is None:
+        name_map = {}
+    children = [_build_hierarchy_node(c, name_map) for c in node.get("children", [])]
 
     part_ids = []
     if node.get("is_leaf"):
         pid = node.get("name", "").replace(" ", "_")
         if pid:
-            part_ids.append(pid)
+            mapped = name_map.get(pid, pid)
+            part_ids.append(mapped)
     for c in children:
         part_ids.extend(c.get("partIds", []))
 
@@ -118,7 +129,7 @@ def build_assembly_json(parts, stages, source_file, contacts=None,
             "parts": stage_parts,
         })
 
-    hierarchy = build_hierarchy(roots) if roots else []
+    hierarchy = build_hierarchy(roots, parts) if roots else []
 
     result = {
         "name": os.path.splitext(os.path.basename(source_file))[0],

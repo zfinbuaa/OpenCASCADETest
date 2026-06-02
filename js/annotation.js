@@ -124,20 +124,6 @@ export class Annotation {
     const leftX = COLUMN_MARGIN;
     const rightX = w - COLUMN_MARGIN;
 
-    // Column boundary lines (dashed)
-    ctx.save();
-    ctx.setLineDash([6, 8]);
-    ctx.strokeStyle = '#999999';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(leftX, COLUMN_MARGIN);
-    ctx.lineTo(leftX, h - COLUMN_MARGIN);
-    ctx.moveTo(rightX, COLUMN_MARGIN);
-    ctx.lineTo(rightX, h - COLUMN_MARGIN);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.restore();
-
     // Vertical spacing
     const topPad = 40;
     const botPad = 40;

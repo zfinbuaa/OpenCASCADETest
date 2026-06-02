@@ -212,8 +212,6 @@ function renderPositionPanel() {
   h += '<button class="btn btn-outline" id="btn-set-fixed">设为固定参照</button>';
   h += '<button class="btn btn-outline" id="btn-clear-fixed">取消固定</button>';
   h += '</div>';
-  h += '<div class="section-title">结构树</div>';
-  h += '<div id="tree-container" style="max-height:220px;overflow-y:auto;"></div>';
   panelBody.innerHTML = h;
   bindPositionPanel();
 }
@@ -261,8 +259,6 @@ function renderExplosionPanel() {
   h += '<button class="btn btn-outline" id="btn-set-fixed">设为固定参照</button>';
   h += '<button class="btn btn-outline" id="btn-clear-fixed">取消固定</button>';
   h += '</div>';
-  h += '<div class="section-title">结构树</div>';
-  h += '<div id="tree-container" style="max-height:180px;overflow-y:auto;"></div>';
   panelBody.innerHTML = h;
   bindExplosionPanel();
 }
@@ -299,8 +295,6 @@ function renderDisassemblyPanel() {
   h += '<button class="btn btn-outline" id="btn-set-fixed">设为固定参照</button>';
   h += '<button class="btn btn-outline" id="btn-clear-fixed">取消固定</button>';
   h += '</div>';
-  h += '<div class="section-title">拆装阶段</div>';
-  h += '<div id="tree-container" style="max-height:180px;overflow-y:auto;"></div>';
   panelBody.innerHTML = h;
   bindDisassemblyPanel();
 }
@@ -512,10 +506,11 @@ function buildActiveTree() {
       }
       statusBar.textContent = '选中: ' + nodeId + ' (' + partIds.length + ' 零件)';
     },
-    onColorChange: (id, color) => {
+    onColorChange: (partIds, color) => {
       const c = new THREE.Color(color);
+      const idSet = new Set(partIds);
       for (const mesh of shared.meshes) {
-        if (mesh.userData.partId === id && mesh.material) {
+        if (idSet.has(mesh.userData.partId) && mesh.material) {
           const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
           for (const mat of mats) { if (mat.color) mat.color.copy(c); }
         }
@@ -659,13 +654,13 @@ async function _loadModelCore(assembly, dir) {
       shared.meshes.push(m);
       meshCount++;
       if (!m.material) {
-        m.material = new THREE.MeshStandardMaterial({ color: p.color || 0xbbbbbb, roughness: 0.5, metalness: 0.0 });
+        m.material = new THREE.MeshStandardMaterial({ color: p.color || 0x0080c0, roughness: 0.5, metalness: 0.0 });
       } else if (Array.isArray(m.material)) {
         for (const mat of m.material) {
-          if (mat.color && mat.color.getHex() === 0xffffff && !p.color) mat.color.set(0xbbbbbb);
+          if (mat.color && mat.color.getHex() === 0xffffff && !p.color) mat.color.set(0x0080c0);
         }
       } else if (m.material.color && m.material.color.getHex() === 0xffffff && !p.color) {
-        m.material.color.set(0xbbbbbb);
+        m.material.color.set(0x0080c0);
       }
     }
     if (p.modelData && p.modelData.scene) {

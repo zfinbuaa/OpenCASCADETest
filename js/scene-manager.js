@@ -43,6 +43,8 @@ export class SceneManager {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.target.set(0, 500, 0);
+    this.controls.minPolarAngle = 0.001;
+    this.controls.maxPolarAngle = Math.PI * 0.999;
     this.controls.update();
 
     this._sceneCenter = new THREE.Vector3(0, 0, 0);
@@ -98,7 +100,7 @@ export class SceneManager {
     this._sceneRadius = diagonal / 2;
     this.controls.target.copy(center);
     const fov = this.camera.fov * Math.PI / 180;
-    const dist = this._sceneRadius / Math.tan(fov / 2) * 0.9;
+    const dist = this._sceneRadius / Math.tan(fov / 2) * 0.65;
     const dir = new THREE.Vector3(1, 0.7, 1).normalize();
     this.camera.position.copy(center).add(dir.multiplyScalar(dist));
     this.controls.update();
@@ -106,7 +108,7 @@ export class SceneManager {
 
   _viewFromDirection(dx, dy, dz) {
     const fov = this.camera.fov * Math.PI / 180;
-    const dist = this._sceneRadius / Math.tan(fov / 2) * 0.9;
+    const dist = this._sceneRadius / Math.tan(fov / 2) * 0.65;
     const dir = new THREE.Vector3(dx, dy, dz).normalize();
     this.camera.position.copy(this._sceneCenter).add(dir.multiplyScalar(dist));
     this.controls.target.copy(this._sceneCenter);
