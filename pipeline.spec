@@ -1,48 +1,30 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for the OCCT disassembly pipeline."""
+"""PyInstaller spec for the OCCT disassembly pipeline.
 
-import os
-import sys
-import glob
+OCC packaging is handled entirely by hooks/hook-OCC.py
+DLL search path setup is handled by hooks/rthook-occ.py
+"""
 
-block_cipher = None
-
-# ── Patch PyInstaller to skip broken subprocess calls ──────
 import PyInstaller.building.build_main as _bm
-# _bm.discover_hook_directories = lambda: []  # uncommented to restore hook auto-discovery
+_bm.discover_hook_directories = lambda: []
 
 _orig_find = _bm.find_binary_dependencies
-def _safe_find_binary_dependencies(*args, **kwargs):
+def _safe_find_binary_dependencies(binaries, *args, **kwargs):
     try:
-        return _orig_find(*args, **kwargs)
+        return _orig_find(binaries, *args, **kwargs)
     except Exception:
-        return []
+        import sys
+        print("WARN: binary dependency scan failed, continuing", file=sys.stderr)
+        return set()
 _bm.find_binary_dependencies = _safe_find_binary_dependencies
 
-# ── Collect OCCT data files (Python wrappers .py/.pyi) ─────
-occt_datas = []
-try:
-    import OCC
-    occ_dir = os.path.dirname(OCC.__file__)
-    occt_datas.append((occ_dir, 'OCC'))
-except ImportError:
-    pass
-
-# ── Collect ALL DLLs from conda Library/bin ───────────────
-conda_bin = os.path.join(
-    os.environ.get('USERPROFILE', ''),
-    'miniconda3', 'envs', 'pyoccenv', 'Library', 'bin')
-
-occt_binaries = []
-if os.path.isdir(conda_bin):
-    for dll_path in glob.glob(os.path.join(conda_bin, '*.dll')):
-        occt_binaries.append((dll_path, '.'))
+block_cipher = None
 
 a = Analysis(
     ['pipeline.py'],
     pathex=[],
-    binaries=occt_binaries,
-    datas=occt_datas,
+    binaries=[],
+    datas=[],
     hiddenimports=[
         'pipeline',
         'pipeline.stp_reader',
@@ -59,36 +41,32 @@ a = Analysis(
         'pipeline.assembly_json',
         'pipeline.bom_loader',
         'pipeline.dependency_chain',
+        'pipeline._occ_lock',
         'numpy',
         'openpyxl',
-        'OCC',
-        'OCC.Core',
-        'OCC.Extend',
-        'OCC.Core.Bnd',
-        'OCC.Core.BRep',
-        'OCC.Core.BRepAlgoAPI',
-        'OCC.Core.BRepBndLib',
-        'OCC.Core.BRepBuilderAPI',
-        'OCC.Core.BRepGProp',
-        'OCC.Core.BRepMesh',
-        'OCC.Core.gp',
-        'OCC.Core.GProp',
-        'OCC.Core.STEPCAFControl',
-        'OCC.Core.TDataStd',
-        'OCC.Core.TDF',
-        'OCC.Core.TDocStd',
-        'OCC.Core.TopAbs',
-        'OCC.Core.TopExp',
-        'OCC.Core.TopoDS',
-        'OCC.Core.TopLoc',
-        'OCC.Core.XCAFApp',
-        'OCC.Core.XCAFDoc',
-        'OCC.Extend.DataExchange',
+        'trimesh',
     ],
-    hookspath=[''],
+    hookspath=['hooks'],
     hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
+    runtime_hooks=['hooks/rthook-occ.py'],
+    excludes=[
+        'tkinter',
+        '_tkinter',
+        'OCC.Display',
+        'OCC.Display.qtDisplay',
+        'OCC.Display.tkDisplay',
+        'OCC.Display.wxDisplay',
+        'OCC.Display.SimpleGui',
+        'PyQt5',
+        'PyQt6',
+        'PySide2',
+        'PySide6',
+        'wx',
+        'matplotlib',
+        'IPython',
+        'jupyter',
+        'pytest',
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

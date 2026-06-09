@@ -60,7 +60,8 @@ def _build_hierarchy_node(node, name_map=None):
 
 def build_assembly_json(parts, stages, source_file, contacts=None,
                         fasteners=None, verified_directions=None,
-                        distance_multipliers=None, roots=None):
+                        distance_multipliers=None, roots=None,
+                        chain_info=None):
     """
     Build the assembly.json data structure.
 
@@ -105,6 +106,7 @@ def build_assembly_json(parts, stages, source_file, contacts=None,
             entry["direction"] = verified_directions[entry["name"]]
         if entry["name"] in distance_multipliers:
             entry["distanceMultiplier"] = distance_multipliers[entry["name"]]
+            entry["safeDistance"] = round(float(distance_multipliers[entry["name"]]) * 150.0, 1)
 
     groups = []
     for entry in part_entries:
@@ -145,6 +147,9 @@ def build_assembly_json(parts, stages, source_file, contacts=None,
             "totalFasteners": len(fasteners),
         },
     }
+
+    if chain_info:
+        result["chainInfo"] = chain_info
 
     return result
 

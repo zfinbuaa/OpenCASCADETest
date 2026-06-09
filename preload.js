@@ -59,6 +59,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Run BOM full pipeline with cached paths (no file dialog). */
   runBomFullPipelineCached: (bomPath, modelsDir, targetPart) => ipcRenderer.invoke('run-bom-full-pipeline-cached', bomPath, modelsDir, targetPart),
 
+  /** Run single-file STP dependency chain analysis for a target part. */
+  runSinglePipelineChain: (stpPath, targetPart) => ipcRenderer.invoke('run-single-pipeline-chain', stpPath, targetPart),
+
   /** Run preview pipeline (STP → mesh + glb, no analysis). */
   runPreviewPipeline: () => ipcRenderer.invoke('run-preview-pipeline'),
 

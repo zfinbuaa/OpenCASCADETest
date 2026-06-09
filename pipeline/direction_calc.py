@@ -15,6 +15,10 @@ from OCC.Core.Bnd import Bnd_Box
 from OCC.Core.BRepBndLib import brepbndlib
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.BRepGProp import brepgprop
+from OCC.Core.TopExp import TopExp_Explorer
+from OCC.Core.TopAbs import TopAbs_FACE
+from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
+from OCC.Core.GeomAbs import GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone
 
 
 _CANDIDATE_DIRS = []
@@ -159,6 +163,105 @@ def _bbox_longest_axis_direction(part_name, parts):
     return None
 
 
+def _infer_constrained_direction(part_name, parts, contacts):
+    """
+    Infer the natural disassembly direction from contact surface geometry.
+
+    Analyses the B-Rep face types near contact points to determine
+    the implied assembly constraint:
+      - Planar contact   →  face normal (perpendicular to mating surface)
+      - Cylindrical face →  cylinder axis (bolt/shaft/pin removal direction)
+      - Conical face     →  cone axis
+
+    Returns:
+        list[float]: [x, y, z] candidate direction, or None if inference fails.
+    """
+    contacts_for_part = [c for c in (contacts or [])
+                         if c.get("partA") == part_name or c.get("partB") == part_name]
+    if not contacts_for_part:
+        return None
+
+    part_shape = None
+    for p in parts:
+        if p["name"] == part_name:
+            part_shape = p["shape"]
+            break
+    if part_shape is None:
+        return None
+
+    face_infos = []
+    exp = TopExp_Explorer(part_shape, TopAbs_FACE)
+    while exp.More():
+        face = exp.Current()
+        try:
+            surf = BRepAdaptor_Surface(face)
+            stype = surf.GetType()
+            if stype == GeomAbs_Plane:
+                plane = surf.Plane()
+                ax = plane.Axis()
+                d = ax.Direction()
+                face_infos.append((np.array([d.X(), d.Y(), d.Z()]), 'plane'))
+        except Exception:
+            exp.Next()
+            continue
+
+        try:
+            if stype == GeomAbs_Cylinder:
+                cyl = surf.Cylinder()
+                ax = cyl.Axis()
+                d = ax.Direction()
+                face_infos.append((np.array([d.X(), d.Y(), d.Z()]), 'cylinder'))
+            elif stype == GeomAbs_Cone:
+                cone = surf.Cone()
+                ax = cone.Axis()
+                d = ax.Direction()
+                face_infos.append((np.array([d.X(), d.Y(), d.Z()]), 'cone'))
+        except Exception:
+            pass
+
+        exp.Next()
+
+    if not face_infos:
+        return None
+
+    has_cylindrical = any(fi[1] in ('cylinder', 'cone') for fi in face_infos)
+
+    contact_normals = []
+    contact_weights = []
+    for c in contacts_for_part:
+        normal = c.get("avgNormal", [0, 0, 1])
+        area = c.get("contactArea", 0.0)
+        n = np.array(normal, dtype=np.float64)
+        norm_len = np.linalg.norm(n)
+        if norm_len < 1e-10:
+            continue
+        contact_normals.append(n / norm_len)
+        contact_weights.append(max(area, 0.01))
+
+    if not contact_normals:
+        return None
+
+    avg_contact_normal = np.zeros(3)
+    total_w = sum(contact_weights)
+    for n, w in zip(contact_normals, contact_weights):
+        avg_contact_normal += n * w
+    if total_w > 1e-10:
+        avg_contact_normal /= total_w
+
+    if has_cylindrical:
+        cyl_axes = [fi[0] for fi in face_infos if fi[1] in ('cylinder', 'cone')]
+        if cyl_axes:
+            avg_axis = np.zeros(3)
+            for ax in cyl_axes:
+                avg_axis += ax
+            avg_axis /= np.linalg.norm(avg_axis)
+            if np.dot(avg_contact_normal, avg_axis) > 0:
+                avg_axis = -avg_axis
+            return _project_to_candidates(avg_axis)
+
+    return _project_to_candidates(avg_contact_normal)
+
+
 def _compute_sibling_repulsion(part_name, parts, centroids):
     """
     Compute a direction that moves this part away from its siblings
@@ -202,15 +305,17 @@ def _compute_sibling_repulsion(part_name, parts, centroids):
 
 
 def calc_disassembly_direction(part_name, parts, centroids=None,
-                                assembly_centroid=None, sub_assemblies=None):
+                                assembly_centroid=None, sub_assemblies=None,
+                                contacts=None):
     """
     Calculate the disassembly direction for a given part.
 
     Algorithm:
-    1. Compute outward direction = normalize(part_centroid - assembly_centroid)
-    2. Modify with sibling repulsion (move away from sibling cluster)
+    1. Try constraint inference from contact face types
+       (planar contact → face normal, cylindrical → axis direction)
+    2. Fallback: centroid-outward with sibling repulsion
     3. Project onto 26 candidate directions
-    4. Fallback: bbox longest axis, then +Y
+    4. Ultimate fallback: bbox longest axis, then +Y
 
     Args:
         part_name: name of the part.
@@ -218,10 +323,16 @@ def calc_disassembly_direction(part_name, parts, centroids=None,
         centroids: optional pre-computed centroids dict.
         assembly_centroid: optional pre-computed assembly centroid.
         sub_assemblies: optional list of sub-assembly dicts (for hierarchy).
+        contacts: optional list of contact dicts for constraint inference.
 
     Returns:
         list[float]: [x, y, z] unit direction vector.
     """
+    if contacts:
+        constrained = _infer_constrained_direction(part_name, parts, contacts)
+        if constrained is not None:
+            return constrained
+
     if centroids is None:
         centroids = _compute_centroids(parts)
     if assembly_centroid is None:
@@ -297,14 +408,16 @@ def _default_direction(part_name, parts, centroids, sub_assemblies=None):
 
 def compute_all_directions(parts, contacts=None, sub_assemblies=None):
     """
-    Compute disassembly directions for all parts using centroid-outward method.
+    Compute disassembly directions for all parts using constraint-inference
+    first, then centroid-outward as fallback.
 
-    Parts with zero contacts are given a default direction (parent centroid
-    to part centroid), skipping expensive sibling repulsion computation.
+    For parts with contacts, analyses face types to infer natural
+    disassembly direction (planar → face normal, cylindrical → axis).
+    Parts without contacts use a simple parent-centroid direction.
 
     Args:
         parts: list of part dicts with 'name', 'shape', 'parent'.
-        contacts: optional list of contact dicts (used to identify free parts).
+        contacts: optional list of contact dicts (used for constraint inference).
         sub_assemblies: optional list of sub-assembly dicts.
 
     Returns:
@@ -327,6 +440,7 @@ def compute_all_directions(parts, contacts=None, sub_assemblies=None):
                 name, parts, centroids, sub_assemblies)
         else:
             directions[name] = calc_disassembly_direction(
-                name, parts, centroids, assembly_centroid, sub_assemblies)
+                name, parts, centroids, assembly_centroid, sub_assemblies,
+                contacts=contacts)
 
     return directions

@@ -310,6 +310,45 @@ export class TreeView {
     return this.selectedPartIds;
   }
 
+  selectNodeByPartId(partId) {
+    const result = this._findNodeByPartId(this.hierarchy, partId, []);
+    if (!result) return false;
+    const { node, ancestors } = result;
+
+    for (const ancId of ancestors) {
+      const ancRow = this.container.querySelector('[data-node-id="' + ancId + '"]');
+      if (!ancRow) continue;
+      const arrow = ancRow.querySelector('.arrow');
+      const childrenDiv = ancRow.nextElementSibling;
+      if (childrenDiv && childrenDiv.classList.contains('tree-children')) {
+        childrenDiv.classList.remove('collapsed');
+        this._collapsed.delete(ancId);
+        if (arrow) arrow.textContent = '▼';
+      }
+    }
+
+    const row = this.container.querySelector('[data-node-id="' + node.id + '"]');
+    if (!row) return false;
+    this._select(row, node);
+    row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    return true;
+  }
+
+  _findNodeByPartId(nodes, partId, ancestors) {
+    for (const node of nodes) {
+      if (node.children && node.children.length > 0) {
+        ancestors.push(node.id);
+        const result = this._findNodeByPartId(node.children, partId, ancestors);
+        if (result) return result;
+        ancestors.pop();
+      }
+      if (node.partIds && node.partIds.includes(partId)) {
+        return { node, ancestors: [...ancestors] };
+      }
+    }
+    return null;
+  }
+
   setFixedPartIds(ids) {
     this._fixedPartIds = new Set(ids);
     this.build(this.hierarchy, Object.values(this.partsMap), []);

@@ -361,6 +361,53 @@ ipcMain.handle('run-pipeline-for-node-cached', async (_event, stpPath, rootNode)
   });
 });
 
+// ── Single-file STP Pipeline: dependency chain for a target part ─
+
+ipcMain.handle('run-single-pipeline-chain', async (_event, stpPath, targetPart) => {
+  if (typeof stpPath !== 'string' || !fs.existsSync(stpPath)) {
+    safeSend('pipeline-progress', 'ERROR: STP file not found: ' + stpPath);
+    return;
+  }
+  const ext = path.extname(stpPath).toLowerCase();
+  if (ext !== '.stp' && ext !== '.step') {
+    safeSend('pipeline-progress', 'ERROR: invalid STP extension: ' + ext);
+    return;
+  }
+  if (!validatePartName(targetPart)) {
+    safeSend('pipeline-progress', 'ERROR: invalid targetPart name');
+    return;
+  }
+
+  const outputDir = _tsOutputDir(stpPath);
+  registerAllowedRoot(outputDir);
+  registerAllowedRoot(path.dirname(stpPath));
+  const { exePath, baseArgs } = findPipelineExe();
+
+  const args = [
+    ...baseArgs,
+    stpPath,
+    '--output-dir', outputDir,
+    '--target-part', targetPart,
+  ];
+
+  safeSend('pipeline-progress', '=== 依赖链分析 (目标: ' + targetPart + ') ===');
+  safeSend('pipeline-mode', 'chain');
+  safeSend('pipeline-started', stpPath);
+
+  const env = buildPipelineEnv();
+  const proc = spawnPipeline(exePath, args, env);
+
+  proc.on('close', (code) => {
+    if (code === 0) {
+      const jsonPath = path.join(outputDir, 'assembly.json');
+      safeSend('pipeline-complete', jsonPath);
+    } else {
+      safeSend('pipeline-progress', '管线执行失败，退出码: ' + code);
+      safeSend('pipeline-error', code);
+    }
+  });
+});
+
 ipcMain.handle('run-pipeline-for-node', async (_event, rootNode) => {
   if (!validatePartName(rootNode)) {
     safeSend('pipeline-progress', 'ERROR: invalid rootNode name');

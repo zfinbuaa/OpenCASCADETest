@@ -207,11 +207,6 @@ function renderPositionPanel() {
   h += '<button class="btn btn-outline" id="btn-annot-hide">清除标注</button>';
   h += '<button class="btn btn-outline" id="btn-export">导出 PNG</button>';
   h += '</div>';
-  h += '<div class="section-title">固定参照</div>';
-  h += '<div class="btn-group">';
-  h += '<button class="btn btn-outline" id="btn-set-fixed">设为固定参照</button>';
-  h += '<button class="btn btn-outline" id="btn-clear-fixed">取消固定</button>';
-  h += '</div>';
   panelBody.innerHTML = h;
   bindPositionPanel();
 }
@@ -254,11 +249,6 @@ function renderExplosionPanel() {
   h += '<button class="btn btn-outline" id="btn-annot-hide">清除标注</button>';
   h += '<button class="btn btn-outline" id="btn-thrust">推力线</button>';
   h += '<button class="btn btn-outline" id="btn-export">导出 PNG</button></div>';
-  h += '<div class="section-title">固定参照</div>';
-  h += '<div class="btn-group">';
-  h += '<button class="btn btn-outline" id="btn-set-fixed">设为固定参照</button>';
-  h += '<button class="btn btn-outline" id="btn-clear-fixed">取消固定</button>';
-  h += '</div>';
   panelBody.innerHTML = h;
   bindExplosionPanel();
 }
@@ -290,10 +280,10 @@ function renderDisassemblyPanel() {
   h += '</div>';
   h += '<div class="section-title">导出</div>';
   h += '<div class="btn-group"><button class="btn btn-outline" id="btn-export">导出 PNG</button></div>';
-  h += '<div class="section-title">固定参照</div>';
+  h += '<div class="section-title">依赖链演示</div>';
   h += '<div class="btn-group">';
-  h += '<button class="btn btn-outline" id="btn-set-fixed">设为固定参照</button>';
-  h += '<button class="btn btn-outline" id="btn-clear-fixed">取消固定</button>';
+  h += '<button class="btn btn-pri" id="btn-chain-demo">AI最佳拆装路径</button>';
+  h += '<button class="btn btn-outline" id="btn-chain-reset">复位</button>';
   h += '</div>';
   panelBody.innerHTML = h;
   bindDisassemblyPanel();
@@ -310,27 +300,96 @@ function _bindViewButtons() {
   document.getElementById('btn-viso')?.addEventListener('click', () => sm.viewIsometric());
 }
 
-function _bindFixedButtons() {
-  document.getElementById('btn-set-fixed')?.addEventListener('click', () => {
-    const t = tabs[activeTab];
-    if (!t.tree) { statusBar.textContent = '请先加载数据'; return; }
-    const partIds = t.tree.getSelectedPartIds();
-    if (!partIds || partIds.length === 0) { statusBar.textContent = '请先在结构树中选择节点'; return; }
-    for (const id of partIds) shared.fixedPartIds.add(id);
-    sharedExplo.setFixedPartIds(shared.fixedPartIds);
-    for (const tab of tabs) {
-      if (tab.tree) tab.tree.setFixedPartIds(shared.fixedPartIds);
+let _activeChainPayload = null;
+let _preDemoGroups = null;
+let _inChainDemo = false;
+
+function _bindChainDemoButtons() {
+  document.getElementById('btn-chain-demo')?.addEventListener('click', () => {
+    if (!_activeChainPayload) {
+      _showModal('未执行分析',
+        '请先运行依赖链分析：<br><br>' +
+        '在<b>结构树</b>中选择目标零件 → 点击<b>"选中目标 → 分析拆卸链"</b>');
+      return;
     }
-    statusBar.textContent = '已设为固定: ' + partIds.length + ' 个零件';
-  });
-  document.getElementById('btn-clear-fixed')?.addEventListener('click', () => {
-    shared.fixedPartIds.clear();
-    sharedExplo.setFixedPartIds([]);
-    for (const tab of tabs) {
-      if (tab.tree) tab.tree.setFixedPartIds([]);
+    if (_inChainDemo) {
+      statusBar.textContent = '依赖链演示进行中，请先复位';
+      return;
     }
-    statusBar.textContent = '已取消所有固定参照';
+    _startChainDemo(_activeChainPayload);
   });
+  document.getElementById('btn-chain-reset')?.addEventListener('click', () => {
+    _endChainDemo();
+  });
+}
+
+function _startChainDemo(payload) {
+  if (!_inChainDemo) {
+    _preDemoGroups = shared.groups ? [...shared.groups] : null;
+  }
+
+  shared.fixedPartIds.clear();
+  sharedExplo.setFixedPartIds(new Set());
+
+  const chainPartIds = new Set();
+  for (const stg of payload.chain || []) {
+    for (const p of stg.parts || []) chainPartIds.add(p);
+  }
+
+  const stageByPart = {};
+  for (let i = 0; i < (payload.chain || []).length; i++) {
+    for (const p of payload.chain[i].parts || []) {
+      stageByPart[p] = i + 1;
+    }
+  }
+
+  const chainGroups = [];
+  for (const g of (shared.groups || [])) {
+    const relevant = g.meshes.filter(m => chainPartIds.has(m.userData.partId));
+    if (relevant.length === 0) continue;
+
+    let stage = 1;
+    for (const m of relevant) {
+      if (stageByPart[m.userData.partId]) {
+        stage = stageByPart[m.userData.partId];
+        break;
+      }
+    }
+
+    chainGroups.push({
+      id: g.id,
+      name: g.name,
+      meshes: relevant,
+      direction: payload.chosen_direction || g.direction,
+      distanceMultiplier: g.distanceMultiplier || 1.0,
+      stage: stage,
+    });
+  }
+
+  if (chainGroups.length === 0) {
+    statusBar.textContent = '依赖链零件在场景中未加载';
+    return;
+  }
+
+  sharedExplo.loadAssemblyGroups(chainGroups);
+  _inChainDemo = true;
+  statusBar.textContent = '依赖链演示: ' + chainPartIds.size + ' 个零件';
+
+  setTimeout(() => {
+    sharedExplo.disassembleSequential(800);
+  }, 200);
+}
+
+function _endChainDemo() {
+  sharedExplo.restoreAll();
+  if (_preDemoGroups) {
+    sharedExplo.loadAssemblyGroups(_preDemoGroups);
+    _preDemoGroups = null;
+  }
+  shared.fixedPartIds.clear();
+  sharedExplo.setFixedPartIds(new Set());
+  _inChainDemo = false;
+  statusBar.textContent = '已恢复整车视图';
 }
 
 function _bindDisassemblyButtons() {
@@ -416,7 +475,7 @@ function bindPositionPanel() {
   document.getElementById('btn-annot-hide')?.addEventListener('click', () => annot.clear());
   document.getElementById('btn-export')?.addEventListener('click', _exportAnnotated);
   _bindViewButtons();
-  _bindFixedButtons();
+  _bindChainDemoButtons();
   buildActiveTree();
   _renderBomList();
 }
@@ -450,7 +509,7 @@ function bindExplosionPanel() {
   document.getElementById('btn-thrust')?.addEventListener('click', () => sharedExplo.toggleThrustLines());
   document.getElementById('btn-export')?.addEventListener('click', _exportAnnotated);
   _bindViewButtons();
-  _bindFixedButtons();
+  _bindChainDemoButtons();
   _bindDisassemblyButtons();
   buildActiveTree();
 }
@@ -460,12 +519,33 @@ function bindDisassemblyPanel() {
 
   document.getElementById('btn-pipeline-chain')?.addEventListener('click', async () => {
     if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
-    const targetPart = shared.selectedNode || tabs[activeTab].tree?.getCheckedNodeId();
-    if (!targetPart) { statusBar.textContent = '请先在结构树中选择或勾选目标零件'; return; }
-    if (!shared.bomSourcePath) { statusBar.textContent = '请先通过位置图加载BOM数据'; return; }
+
+    const targetPart = _resolveTargetPart();
+    if (!targetPart) {
+      _showTargetHint();
+      return;
+    }
+
+    const hasBom = !!shared.bomSourcePath;
+    const hasStp = !!shared.sourceStpPath;
+
+    if (!hasBom && !hasStp) {
+      _showModal('无可用数据',
+        '请先加载装配数据再进行依赖链分析:<br><br>' +
+        '<ul><li>方法1: 通过 <b>位置图 → 加载BOM</b> 加载多文件 BOM</li>' +
+        '<li>方法2: 通过 <b>Ctrl+I</b> 导入单文件 STP</li></ul>');
+      return;
+    }
+
     statusBar.textContent = '分析拆卸依赖链: ' + targetPart + '...';
-    await window.electronAPI.runBomFullPipelineCached(
-      shared.bomSourcePath, shared.bomModelsDir, targetPart);
+
+    if (hasBom) {
+      await window.electronAPI.runBomFullPipelineCached(
+        shared.bomSourcePath, shared.bomModelsDir, targetPart);
+    } else {
+      await window.electronAPI.runSinglePipelineChain(
+        shared.sourceStpPath, targetPart);
+    }
   });
   document.getElementById('btn-explode')?.addEventListener('click', () => sharedExplo.explodeGroupsAnimated(800));
   document.getElementById('btn-reset')?.addEventListener('click', () => sharedExplo.resetPositions());
@@ -480,11 +560,131 @@ function bindDisassemblyPanel() {
     statusBar.textContent = '启动管线 (节点: ' + nodeName + ')...';
     await window.electronAPI.runPipelineForNodeCached(shared.sourceStpPath, nodeName);
   });
-  _bindFixedButtons();
+  _bindChainDemoButtons();
   _bindDisassemblyButtons();
   buildActiveTree();
   const display = document.getElementById('sel-node-display');
   if (display) display.textContent = shared.selectedNode || '未选中';
+}
+
+function _resolveTargetPart() {
+  const sel = shared.selectedNode;
+  if (sel) return sel;
+  const checked = tabs[activeTab].tree?.getCheckedNodeId();
+  if (checked) return checked;
+  return null;
+}
+
+function _showTargetHint() {
+  _showModal('请选择目标部件',
+    '在左侧 <b>结构树</b> 中:<br>' +
+    '<ul style="margin:8px 0;padding-left:20px;line-height:1.7">' +
+    '<li><b>点击</b> 单个零件 → 分析该零件的拆卸依赖链</li>' +
+    '<li><b>勾选</b> 子装配节点 → 分析该子装配的整体拆卸依赖链</li>' +
+    '</ul>' +
+    '<p style="color:#7ec8e3;font-size:11px;margin-top:8px">' +
+    '支持任何层级节点：leaf 零件 / 子装配 / BOM 单元</p>');
+  const container = document.getElementById('tree-container');
+  if (container) {
+    container.style.transition = 'box-shadow 0.3s';
+    container.style.boxShadow = '0 0 12px 2px #7ec8e3';
+    setTimeout(() => { container.style.boxShadow = ''; }, 1800);
+  }
+}
+
+function _showModal(title, htmlBody) {
+  const existing = document.getElementById('app-modal-overlay');
+  if (existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'app-modal-overlay';
+  overlay.style.cssText =
+    'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.55);' +
+    'z-index:9999;display:flex;align-items:center;justify-content:center;';
+  const box = document.createElement('div');
+  box.style.cssText =
+    'background:#1a1a2e;color:#e0e0e0;border:1px solid #3a3a5a;border-radius:6px;' +
+    'padding:20px 24px;max-width:480px;min-width:320px;font-size:13px;' +
+    'box-shadow:0 6px 24px rgba(0,0,0,0.6);';
+  box.innerHTML =
+    '<h3 style="margin:0 0 12px 0;font-size:15px;color:#7ec8e3">' + title + '</h3>' +
+    '<div style="line-height:1.6">' + htmlBody + '</div>' +
+    '<div style="text-align:right;margin-top:16px">' +
+    '<button id="app-modal-ok" style="padding:6px 16px;background:#2a5a8c;color:#fff;' +
+    'border:none;border-radius:3px;cursor:pointer;font-size:12px">知道了</button>' +
+    '</div>';
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  document.getElementById('app-modal-ok').onclick = close;
+  overlay.onclick = (e) => { if (e.target === overlay) close(); };
+}
+
+function _renderChainResult(payload) {
+  _activeChainPayload = payload;
+  const log = document.getElementById('pipeline-log-placeholder');
+  if (!log) return;
+  const target = payload.target || '?';
+  const resolved = payload.resolved_target && payload.resolved_target !== target
+    ? ' → ' + payload.resolved_target : '';
+  const chain = payload.chain || [];
+  const feasible = payload.feasible_count ?? 0;
+  const blocked = payload.blocked_count ?? 0;
+  const total = payload.total_count ?? chain.length;
+  const optEnabled = payload.optimize_direction !== false;
+
+  let html = '<div style="color:#7ec8e3;font-weight:bold;margin-bottom:4px">';
+  html += '依赖链分析: ' + target + resolved + '</div>';
+  html += '<div style="margin-bottom:6px;color:#aaa">';
+  html += '共 ' + total + ' 件, 可行 ' + feasible;
+  html += (blocked > 0 ? ', <span style="color:#ff8a4a">阻塞 ' + blocked + '</span>' : '');
+  if (optEnabled) {
+    html += ' <span style="color:#7ec8e3">[方向最优化]</span>';
+  }
+  html += '</div>';
+
+  const considered = payload.considered_directions || [];
+  if (optEnabled && considered.length > 1) {
+    html += '<div style="margin:6px 0 4px 0;color:#7ec8e3;font-weight:bold">方向比较</div>';
+    html += '<div style="background:#0a1a2a;padding:4px 6px;margin-bottom:6px;border-radius:3px">';
+    html += '<table style="width:100%;font-size:10px;border-collapse:collapse">';
+    html += '<tr style="color:#7ec8e3;border-bottom:1px solid #3a3a5a">' +
+            '<th style="text-align:left;padding:2px">方向</th>' +
+            '<th style="text-align:right;padding:2px">直接阻挡</th>' +
+            '<th style="text-align:right;padding:2px">递归总件数</th>' +
+            '<th style="text-align:center;padding:2px">选用</th></tr>';
+    for (const c of considered) {
+      const dirStr = (c.direction || []).map(v => v.toFixed(1)).join(',');
+      const sel = c.selected
+        ? '<span style="color:#ffd24a;font-weight:bold">★</span>'
+        : (c.pruned ? '<span style="color:#888">剪枝</span>' : '');
+      const costStr = c.chain_cost === null ? '—' : (c.chain_cost ?? '?');
+      const rowStyle = c.selected
+        ? 'background:#1a2a4a;color:#ffd24a'
+        : 'color:#9acdff';
+      html += '<tr style="' + rowStyle + '">' +
+              '<td style="padding:1px 2px">[' + dirStr + ']</td>' +
+              '<td style="text-align:right;padding:1px 2px">' + (c.blockers_count ?? '?') + '</td>' +
+              '<td style="text-align:right;padding:1px 2px">' + costStr + '</td>' +
+              '<td style="text-align:center;padding:1px 2px">' + sel + '</td></tr>';
+    }
+    html += '</table></div>';
+  }
+
+  html += '<div style="margin:6px 0 4px 0;color:#7ec8e3;font-weight:bold">拆卸链路</div>';
+  for (let i = 0; i < chain.length; i++) {
+    const stg = chain[i];
+    const isTarget = (i === chain.length - 1);
+    const tag = isTarget
+      ? '<span style="color:#ffd24a">★ 目标</span>'
+      : '<span style="color:#9acdff">阻挡件</span>';
+    const partsStr = (stg.parts || []).join(', ');
+    html += '<div style="padding:2px 0;border-left:2px solid ' +
+      (isTarget ? '#ffd24a' : '#3a3a5a') +
+      ';padding-left:6px;margin:2px 0">' +
+      'Stage ' + stg.stage + ' [' + tag + ']: ' + partsStr + '</div>';
+  }
+  log.innerHTML = html;
+  statusBar.textContent = '依赖链分析完成: ' + total + ' 件 (' + feasible + ' 可行)';
 }
 
 function buildActiveTree() {
@@ -621,6 +821,10 @@ async function _loadModelCore(assembly, dir) {
   shared.assembly = assembly;
   shared.loaded = new Map();
   shared.meshes = [];
+
+  if (assembly.chainInfo) {
+    _renderChainResult(assembly.chainInfo);
+  }
 
   let meshCount = 0;
   let skipCount = 0;
@@ -791,6 +995,9 @@ function _setupViewportClick() {
   if (_viewportPointerHandler) {
     canvas.removeEventListener('pointerdown', _viewportPointerHandler.down);
     canvas.removeEventListener('pointerup', _viewportPointerHandler.up);
+    if (_viewportPointerHandler.dblclick) {
+      canvas.removeEventListener('dblclick', _viewportPointerHandler.dblclick);
+    }
   }
 
   let pointerDownPos = null;
@@ -820,21 +1027,35 @@ function _setupViewportClick() {
     if (!partId) return;
     _highlightPart(partId);
     statusBar.textContent = '选中: ' + partId;
+  };
+
+  const onDblClick = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, sm.camera);
+    const intersects = raycaster.intersectObjects(shared.meshes, false);
+    if (intersects.length === 0) return;
+
+    const partId = intersects[0].object.userData.partId;
+    if (!partId) return;
 
     const t = tabs[activeTab];
-    if (t.tree) {
-      const sel = t.tree.container.querySelector('[data-node-id="' + partId + '"]');
-      if (sel) {
-        if (t.tree.selected) t.tree.selected.classList.remove('selected');
-        t.tree.selected = sel;
-        sel.classList.add('selected');
+    if (t.tree && typeof t.tree.selectNodeByPartId === 'function') {
+      const found = t.tree.selectNodeByPartId(partId);
+      if (found) {
+        statusBar.textContent = '定位到结构树: ' + partId;
       }
     }
   };
 
   canvas.addEventListener('pointerdown', onDown);
   canvas.addEventListener('pointerup', onUp);
-  _viewportPointerHandler = { down: onDown, up: onUp };
+  canvas.addEventListener('dblclick', onDblClick);
+  _viewportPointerHandler = { down: onDown, up: onUp, dblclick: onDblClick };
 }
 
 // ── Export Helpers ───────────────────────────────────────
@@ -867,7 +1088,22 @@ function _logPipeline(msg) {
 }
 
 if (window.electronAPI) {
-  window.electronAPI.onPipelineProgress((msg) => _logPipeline(msg));
+  window.electronAPI.onPipelineProgress((msg) => {
+    if (typeof msg === 'string') {
+      const idx = msg.indexOf('CHAIN_RESULT_JSON:');
+      if (idx >= 0) {
+        try {
+          const jsonStr = msg.slice(idx + 'CHAIN_RESULT_JSON:'.length).trim();
+          const payload = JSON.parse(jsonStr);
+          _renderChainResult(payload);
+        } catch (e) {
+          console.warn('Failed to parse CHAIN_RESULT_JSON:', e);
+        }
+        return;
+      }
+    }
+    _logPipeline(msg);
+  });
   window.electronAPI.onPipelineMode((mode) => { pipelineMode = mode; });
   window.electronAPI.onPipelineStarted((stpPath) => {
     if (stpPath) {

@@ -75,6 +75,8 @@ def main():
                         help="BOM 模式下 STP 文件所在目录（默认同 BOM 文件目录）")
     parser.add_argument("--target-part", default=None,
                         help="仅计算指定零件的拆卸依赖链（依赖链模式）")
+    parser.add_argument("--no-optimize-dir", action="store_true",
+                        help="依赖链模式下关闭方向最优化（使用旧的单方向递归算法）")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -182,17 +184,58 @@ def main():
     log("  {} directions computed ({:.1f}s)".format(len(directions), time.time() - t0))
 
     # Step 7
-    log("[7/8] Building collision-driven disassembly plan...")
-    t0 = time.time()
-
     centroids = _compute_centroids(parts)
     assembly_centroid = _compute_assembly_centroid(parts, centroids)
 
-    stages, verified_dirs, dist_mults, details = build_disassembly_dag_v2(
-        parts, directions, collision_data, fasteners,
-        max_distance=args.explosion_distance,
-        assembly_centroid=assembly_centroid,
-        sub_assemblies=sub_assemblies)
+    chain_result = None
+
+    if args.target_part:
+        log("[7/8] Computing dependency chain for target: {}".format(args.target_part))
+        from pipeline.dependency_chain import compute_dependency_chain
+        t0 = time.time()
+        stages, verified_dirs, dist_mults, details = compute_dependency_chain(
+            parts, directions, collision_data, args.target_part,
+            max_distance=args.explosion_distance,
+            assembly_centroid=assembly_centroid,
+            sub_assemblies=sub_assemblies,
+            optimize_direction=not args.no_optimize_dir)
+        log("  {} stages in dependency chain ({:.1f}s)".format(
+            len(stages), time.time() - t0))
+
+        target_detail = None
+        for d in details:
+            if d.get("part") == args.target_part:
+                target_detail = d
+                break
+        if target_detail is None and details:
+            target_detail = details[0]
+
+        chain_result = {
+            "mode": "dependency_chain",
+            "target": args.target_part,
+            "chain": [{"stage": i + 1, "parts": s} for i, s in enumerate(stages)],
+            "feasible_count": sum(1 for d in details if d.get("feasible")),
+            "blocked_count": sum(1 for d in details if not d.get("feasible")),
+            "total_count": len(details),
+            "optimize_direction": not args.no_optimize_dir,
+            "chosen_direction": target_detail.get("chosen_direction") if target_detail else None,
+            "considered_directions": target_detail.get("considered_directions", []) if target_detail else [],
+            "expected_chain_cost": target_detail.get("expected_chain_cost") if target_detail else None,
+        }
+        log("CHAIN_RESULT_JSON: " + json.dumps(chain_result, ensure_ascii=False))
+    else:
+        log("[7/8] Building collision-driven disassembly plan...")
+        t0 = time.time()
+        stages, verified_dirs, dist_mults, details = build_disassembly_dag_v2(
+            parts, directions, collision_data, fasteners,
+            max_distance=args.explosion_distance,
+            assembly_centroid=assembly_centroid,
+            sub_assemblies=sub_assemblies)
+
+        feasible = sum(1 for d in details if d.get("feasible"))
+        blocked = len(details) - feasible
+        log("  {} stages, {}/{} parts feasible ({:.1f}s)".format(
+            len(stages), feasible, len(details), time.time() - t0))
 
     for part in parts:
         name = part["name"]
@@ -201,8 +244,6 @@ def main():
 
     feasible = sum(1 for d in details if d.get("feasible"))
     blocked = len(details) - feasible
-    log("  {} stages, {}/{} parts feasible ({:.1f}s)".format(
-        len(stages), feasible, len(details), time.time() - t0))
 
     # Write report
     report_lines = []
@@ -237,6 +278,7 @@ def main():
         parts, stages, args.input, contacts, fasteners,
         verified_directions=verified_dirs,
         distance_multipliers=dist_mults,
+        chain_info=chain_result,
         roots=roots)
     json_path = os.path.join(args.output_dir, "assembly.json")
     write_assembly_json(assembly, json_path)
@@ -714,6 +756,8 @@ def _run_bom_full(args):
     centroids = _compute_centroids(dag_parts)
     assembly_centroid = _compute_assembly_centroid(dag_parts, centroids)
 
+    chain_result = None
+
     if args.target_part:
         from pipeline.dependency_chain import compute_dependency_chain
         dag_target = None
@@ -729,9 +773,33 @@ def _run_bom_full(args):
             dag_parts, directions, dag_collision_data, dag_target,
             max_distance=args.explosion_distance,
             assembly_centroid=assembly_centroid,
-            sub_assemblies=sub_assemblies)
+            sub_assemblies=sub_assemblies,
+            optimize_direction=not args.no_optimize_dir)
         log("  {} stages in dependency chain ({:.1f}s)".format(
             len(stages), time.time() - t0))
+
+        target_detail = None
+        for d in details:
+            if d.get("part") == dag_target:
+                target_detail = d
+                break
+        if target_detail is None and details:
+            target_detail = details[0]
+
+        chain_result = {
+            "mode": "dependency_chain",
+            "target": args.target_part,
+            "resolved_target": dag_target,
+            "chain": [{"stage": i + 1, "parts": s} for i, s in enumerate(stages)],
+            "feasible_count": sum(1 for d in details if d.get("feasible")),
+            "blocked_count": sum(1 for d in details if not d.get("feasible")),
+            "total_count": len(details),
+            "optimize_direction": not args.no_optimize_dir,
+            "chosen_direction": target_detail.get("chosen_direction") if target_detail else None,
+            "considered_directions": target_detail.get("considered_directions", []) if target_detail else [],
+            "expected_chain_cost": target_detail.get("expected_chain_cost") if target_detail else None,
+        }
+        log("CHAIN_RESULT_JSON: " + json.dumps(chain_result, ensure_ascii=False))
     else:
         log("[6/7] Building collision-driven disassembly plan (BOM-level)...")
         t0 = time.time()
@@ -804,6 +872,7 @@ def _run_bom_full(args):
         flat_parts, stages, args.bom, contacts, fasteners,
         verified_directions=verified_dirs,
         distance_multipliers=dist_mults,
+        chain_info=chain_result,
         roots=all_roots)
     json_path = os.path.join(args.output_dir, "assembly.json")
     write_assembly_json(assembly, json_path)

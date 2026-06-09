@@ -120,9 +120,16 @@ def _build_aabb_tree(vertices, triangles, max_leaf_size=8):
 
 
 def _triangles_overlap(v0, v1, v2, u0, u1, u2):
-    """Fast triangle-triangle overlap test using separating axis theorem."""
+    """Fast triangle-triangle overlap test using separating axis theorem.
+
+    Tests all 11 required axes: 2 face normals + 9 edge cross products.
+    For coplanar triangles, falls back to 2D edge-edge intersection check.
+    """
     e0 = v1 - v0
     e1 = v2 - v0
+    f0 = u1 - u0
+    f1 = u2 - u0
+
     n0 = np.cross(e0, e1)
     ln = np.dot(n0, n0)
     if ln < 1e-20:
@@ -143,8 +150,31 @@ def _triangles_overlap(v0, v1, v2, u0, u1, u2):
     if e_min > tol or e_max < -tol:
         return False
 
+    n1 = np.cross(f0, f1)
+    ln1 = np.dot(n1, n1)
+    if ln1 < 1e-20:
+        return False
+    n1 /= ln1 ** 0.5
+
+    coplanar = abs(np.dot(n0, n1)) > 0.9999
+
+    if not coplanar:
+        d1 = np.dot(n1, u0)
+        dv0 = np.dot(n1, v0) - d1
+        dv1 = np.dot(n1, v1) - d1
+        dv2 = np.dot(n1, v2) - d1
+
+        if dv0 * dv1 > 0 and dv0 * dv2 > 0 and dv1 * dv2 > 0:
+            return False
+
+        f_min = min(dv0, dv1, dv2)
+        f_max = max(dv0, dv1, dv2)
+        tol2 = (f_max - f_min) * 0.01
+        if f_min > tol2 or f_max < -tol2:
+            return False
+
     for edge_a in [e0, e1, v2 - v1]:
-        for edge_b in [u1 - u0, u2 - u0, u2 - u1]:
+        for edge_b in [f0, f1, u2 - u1]:
             axis = np.cross(edge_a, edge_b)
             la2 = np.dot(axis, axis)
             if la2 < 1e-20:
@@ -159,7 +189,94 @@ def _triangles_overlap(v0, v1, v2, u0, u1, u2):
             if min(b_vals) > max(a_vals) + 1e-10:
                 return False
 
+    if coplanar:
+        return _coplanar_triangles_overlap_2d(v0, v1, v2, u0, u1, u2, n0)
+
     return True
+
+
+def _coplanar_triangles_overlap_2d(v0, v1, v2, u0, u1, u2, normal):
+    """Check if two coplanar triangles overlap via 2D edge-edge test.
+
+    Projects onto the plane by dropping the axis with largest normal component,
+    then checks for edge intersections and point containment.
+    """
+    abs_n = np.abs(normal)
+    drop = int(np.argmax(abs_n))
+    keep = [i for i in range(3) if i != drop]
+
+    def proj(pt):
+        return np.array([pt[keep[0]], pt[keep[1]]])
+
+    a_pts = [proj(v0), proj(v1), proj(v2)]
+    b_pts = [proj(u0), proj(u1), proj(u2)]
+
+    edges_a = [(a_pts[0], a_pts[1]), (a_pts[1], a_pts[2]), (a_pts[2], a_pts[0])]
+    edges_b = [(b_pts[0], b_pts[1]), (b_pts[1], b_pts[2]), (b_pts[2], b_pts[0])]
+
+    for (sa, ea) in edges_a:
+        for (sb, eb) in edges_b:
+            if _segments_intersect_2d(sa, ea, sb, eb):
+                return True
+
+    if _point_in_triangle_2d(b_pts[0], a_pts[0], a_pts[1], a_pts[2]):
+        return True
+    if _point_in_triangle_2d(a_pts[0], b_pts[0], b_pts[1], b_pts[2]):
+        return True
+
+    return False
+
+
+def _segments_intersect_2d(a, b, c, d):
+    """Check if two 2D segments ab and cd intersect (including endpoints)."""
+    def cross2d(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+    def on_segment(p, q, r):
+        return (min(p[0], q[0]) - 1e-10 <= r[0] <= max(p[0], q[0]) + 1e-10 and
+                min(p[1], q[1]) - 1e-10 <= r[1] <= max(p[1], q[1]) + 1e-10)
+
+    d1 = cross2d(c, d, a)
+    d2 = cross2d(c, d, b)
+    d3 = cross2d(a, b, c)
+    d4 = cross2d(a, b, d)
+
+    if ((d1 > 0 > d2) or (d1 < 0 < d2)) and ((d3 > 0 > d4) or (d3 < 0 < d4)):
+        return True
+
+    if abs(d1) < 1e-10 and on_segment(c, d, a):
+        return True
+    if abs(d2) < 1e-10 and on_segment(c, d, b):
+        return True
+    if abs(d3) < 1e-10 and on_segment(a, b, c):
+        return True
+    if abs(d4) < 1e-10 and on_segment(a, b, d):
+        return True
+
+    return False
+
+
+def _point_in_triangle_2d(pt, a, b, c):
+    """Check if a 2D point is inside triangle abc using barycentric coordinates."""
+    v0x, v0y = c[0] - a[0], c[1] - a[1]
+    v1x, v1y = b[0] - a[0], b[1] - a[1]
+    v2x, v2y = pt[0] - a[0], pt[1] - a[1]
+
+    dot00 = v0x * v0x + v0y * v0y
+    dot01 = v0x * v1x + v0y * v1y
+    dot02 = v0x * v2x + v0y * v2y
+    dot11 = v1x * v1x + v1y * v1y
+    dot12 = v1x * v2x + v1y * v2y
+
+    denom = dot00 * dot11 - dot01 * dot01
+    if abs(denom) < 1e-20:
+        return False
+
+    inv = 1.0 / denom
+    u = (dot11 * dot02 - dot01 * dot12) * inv
+    v = (dot00 * dot12 - dot01 * dot02) * inv
+
+    return u >= -1e-10 and v >= -1e-10 and (u + v) <= 1.0 + 1e-10
 
 
 def _check_mesh_intersection(moved_verts, moved_tris, moved_tree,
@@ -277,7 +394,8 @@ def _has_interference_brep(moved_shape, obstacle_shape, moved_volume):
 
 def check_disassembly_path(part_name, part_shape, other_shapes, direction,
                            max_distance=500.0, steps=20,
-                           collision_data=None):
+                           collision_data=None,
+                           report_all_collisions=False):
     """
     Check if a part can move along a direction without colliding.
 
@@ -289,20 +407,27 @@ def check_disassembly_path(part_name, part_shape, other_shapes, direction,
         max_distance: total distance to check (mm).
         steps: number of discrete check points along the path.
         collision_data: dict of name -> MeshCollisionData (optional).
+        report_all_collisions: if True, collect ALL colliding obstacle names
+            across all obstacles at the first collision step (instead of
+            stopping at the first one). The result dict will contain
+            "collision_names" (list[str]) instead of just "collision_with".
 
     Returns:
-        dict with feasible, max_safe_distance, collision_at_step, collision_with, total_steps.
+        dict with feasible, max_safe_distance, collision_at_step,
+        collision_with (str or None), collision_names (list[str]), total_steps.
     """
     dir_np = np.array(direction, dtype=np.float64)
 
     if collision_data is not None:
         return _check_path_mesh(
             part_name, part_shape, other_shapes, dir_np,
-            max_distance, steps, collision_data)
+            max_distance, steps, collision_data,
+            report_all_collisions=report_all_collisions)
 
     return _check_path_brep(
         part_shape, other_shapes, dir_np,
-        max_distance, steps)
+        max_distance, steps,
+        report_all_collisions=report_all_collisions)
 
 
 def _translate_aabb_tree(node, offset):
@@ -335,14 +460,16 @@ def _safe_coarse_step_size(part_aabb, obstacle_aabbs):
 
 
 def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
-                     max_distance, steps, collision_data):
+                     max_distance, steps, collision_data,
+                     report_all_collisions=False):
     """Mesh-based collision check with AABB pre-filter and binary search."""
     part_data = collision_data.get(part_name)
 
     if part_data is None or part_data.vertices is None or part_data.tree is None:
         return _check_path_brep(
             part_shape, other_shapes, dir_np.tolist(),
-            max_distance, steps)
+            max_distance, steps,
+            report_all_collisions=report_all_collisions)
 
     obs_data_list = []
     for other_name, other_shape in other_shapes:
@@ -358,8 +485,6 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
     base_aabb_max = part_data.aabb_max
     base_verts = part_data.vertices
 
-    coarse_steps = max(3, steps // 5)
-
     part_aabb = (
         float(base_aabb_min[0]), float(base_aabb_min[1]), float(base_aabb_min[2]),
         float(base_aabb_max[0]), float(base_aabb_max[1]), float(base_aabb_max[2]),
@@ -372,14 +497,13 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
                 float(obs_amax[0]), float(obs_amax[1]), float(obs_amax[2]),
             ))
     safe_step = _safe_coarse_step_size(part_aabb, obstacle_aabbs)
-    coarse_step_size = max_distance / max(coarse_steps, 1)
-    if coarse_step_size > safe_step:
-        coarse_step_size = safe_step
-        coarse_steps = max(1, int(np.ceil(max_distance / coarse_step_size)))
+    coarse_step_size = safe_step
+    coarse_steps = max(1, int(np.ceil(max_distance / coarse_step_size)))
     step_size = coarse_step_size
 
     collision_step = -1
     collision_name = None
+    collision_names_set = set()
     last_safe_step = 0
 
     for step in range(1, coarse_steps + 1):
@@ -391,15 +515,15 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
         moved_aabb_min = base_aabb_min + offset
         moved_aabb_max = base_aabb_max + offset
 
+        step_hit = False
         for other_name, obs_v, obs_t, obs_tree, obs_amin, obs_amax, obs_shape in obs_data_list:
+            hit_this = False
             if obs_tree is not None and obs_amin is not None:
                 if _check_mesh_intersection(moved_verts, part_data.triangles,
                                             moved_tree, moved_aabb_min, moved_aabb_max,
                                             obs_v, obs_t, obs_tree,
                                             obs_amin, obs_amax):
-                    collision_step = step
-                    collision_name = other_name
-                    break
+                    hit_this = True
             else:
                 with OCC_BREP_LOCK:
                     vec = gp_Vec(dir_np[0] * dist, dir_np[1] * dist, dir_np[2] * dist)
@@ -408,68 +532,30 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
                     moved_shape = BRepBuilderAPI_Transform(part_shape, trsf).Shape()
                     interferes = _has_interference_brep(moved_shape, obs_shape, part_data.volume)
                 if interferes:
-                    collision_step = step
+                    hit_this = True
+
+            if hit_this:
+                step_hit = True
+                if collision_name is None:
                     collision_name = other_name
+                    collision_step = step
+                collision_names_set.add(other_name)
+                if not report_all_collisions:
                     break
 
-        if collision_step > 0:
+        if step_hit and not report_all_collisions:
+            break
+        if step_hit and report_all_collisions:
             break
         last_safe_step = step
 
     if collision_step < 0:
-        lo = last_safe_step * step_size
-        hi = max_distance
-        final_hit = False
-        final_name = None
-        for _ in range(5):
-            mid = (lo + hi) / 2.0
-            offset = dir_np * mid
-            moved_verts = base_verts + offset
-            moved_tree = _translate_aabb_tree(base_tree, offset)
-            moved_aabb_min = base_aabb_min + offset
-            moved_aabb_max = base_aabb_max + offset
-
-            hit = False
-            for other_name, obs_v, obs_t, obs_tree, obs_amin, obs_amax, obs_shape in obs_data_list:
-                if obs_tree is not None and obs_amin is not None:
-                    if _check_mesh_intersection(moved_verts, part_data.triangles,
-                                                moved_tree, moved_aabb_min, moved_aabb_max,
-                                                obs_v, obs_t, obs_tree,
-                                                obs_amin, obs_amax):
-                        hit = True
-                        final_name = other_name
-                        break
-                else:
-                    with OCC_BREP_LOCK:
-                        vec = gp_Vec(dir_np[0] * mid, dir_np[1] * mid, dir_np[2] * mid)
-                        trsf = gp_Trsf()
-                        trsf.SetTranslation(vec)
-                        moved_shape = BRepBuilderAPI_Transform(part_shape, trsf).Shape()
-                        interferes = _has_interference_brep(moved_shape, obs_shape, part_data.volume)
-                    if interferes:
-                        hit = True
-                        final_name = other_name
-                        break
-
-            if hit:
-                hi = mid
-                final_hit = True
-            else:
-                lo = mid
-
-        if not final_hit:
-            return {
-                "feasible": True,
-                "max_safe_distance": max_distance,
-                "collision_at_step": -1,
-                "collision_with": None,
-                "total_steps": steps,
-            }
         return {
-            "feasible": False,
-            "max_safe_distance": lo,
+            "feasible": True,
+            "max_safe_distance": max_distance,
             "collision_at_step": -1,
-            "collision_with": final_name,
+            "collision_with": None,
+            "collision_names": [],
             "total_steps": steps,
         }
 
@@ -514,12 +600,14 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
         "max_safe_distance": lo,
         "collision_at_step": collision_step,
         "collision_with": collision_name,
+        "collision_names": sorted(collision_names_set),
         "total_steps": steps,
     }
 
 
 def _check_path_brep(part_shape, other_shapes, direction,
-                     max_distance, steps):
+                     max_distance, steps,
+                     report_all_collisions=False):
     """Original BRep boolean collision check (fallback)."""
     step_size = max_distance / steps
 
@@ -537,24 +625,35 @@ def _check_path_brep(part_shape, other_shapes, direction,
         if vol_moved is None:
             continue
 
+        collision_name = None
+        collision_names_set = set()
         for other_name, other_shape in other_shapes:
             with OCC_BREP_LOCK:
                 interferes = _has_interference_brep(moved_shape, other_shape, vol_moved)
             if interferes:
-                safe_dist = (step - 1) * step_size
-                return {
-                    "feasible": False,
-                    "max_safe_distance": safe_dist,
-                    "collision_at_step": step,
-                    "collision_with": other_name,
-                    "total_steps": steps,
-                }
+                if collision_name is None:
+                    collision_name = other_name
+                collision_names_set.add(other_name)
+                if not report_all_collisions:
+                    break
+
+        if collision_name is not None:
+            safe_dist = (step - 1) * step_size
+            return {
+                "feasible": False,
+                "max_safe_distance": safe_dist,
+                "collision_at_step": step,
+                "collision_with": collision_name,
+                "collision_names": sorted(collision_names_set),
+                "total_steps": steps,
+            }
 
     return {
         "feasible": True,
         "max_safe_distance": max_distance,
         "collision_at_step": -1,
         "collision_with": None,
+        "collision_names": [],
         "total_steps": steps,
     }
 
@@ -642,6 +741,124 @@ def find_best_feasible_direction(part_name, part_shape, obstacle_shapes,
         }
 
     return best_dir, best_result
+
+
+def find_all_blockers(part_name, part_shape, obstacle_shapes,
+                      preferred_dir, max_distance=500.0,
+                      collision_data=None):
+    """
+    Search all 26 candidate directions and collect every blocking part.
+
+    Unlike find_best_feasible_direction (which stops at the first feasible
+    direction and cancels remaining tasks), this function completes all 26
+    checks to gather the union of all blockers across all directions.
+
+    This is essential for the dependency chain analyzer to recursively
+    resolve every part that obstructs the target.
+
+    Returns:
+        dict: {
+            "feasible": bool,              # any direction works
+            "best_direction": [x,y,z],     # feasible dir if found, else
+                                            # direction with largest safe_distance
+            "best_result": {...},          # check result for best_direction
+            "blockers": list[str],         # sorted unique blockers across ALL directions
+            "per_direction": list[dict],   # per-direction details
+        }
+    """
+    preferred = np.array(preferred_dir, dtype=np.float64)
+    pnorm = np.linalg.norm(preferred)
+
+    sorted_candidates = []
+    for cand in CANDIDATE_DIRS:
+        if pnorm > 1e-10:
+            dot = float(np.dot(preferred / pnorm, cand))
+        else:
+            dot = 0.0
+        sorted_candidates.append((dot, cand.tolist()))
+
+    sorted_candidates.sort(key=lambda x: -x[0])
+
+    blockers = set()
+    per_direction = []
+    feasible_dir = None
+    feasible_result = None
+    best_safe = -1.0
+    best_dir = None
+    best_result = None
+
+    n_workers = min(max(1, (os.cpu_count() or 4)), 16)
+
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+        futures = {}
+        for _, direction in sorted_candidates:
+            future = ex.submit(
+                check_disassembly_path,
+                part_name, part_shape, obstacle_shapes, direction,
+                max_distance, 20, collision_data)
+            futures[future] = direction
+
+        for future in as_completed(futures):
+            direction = futures[future]
+            try:
+                result = future.result(timeout=300)
+            except Exception:
+                continue
+
+            cw = result.get("collision_with")
+            if cw:
+                if isinstance(cw, str) and cw.strip():
+                    blockers.add(cw.strip())
+                elif isinstance(cw, (list, tuple)):
+                    for b in cw:
+                        if b:
+                            blockers.add(str(b).strip())
+
+            per_direction.append({
+                "direction": direction,
+                "feasible": result.get("feasible", False),
+                "safe_distance": result.get("max_safe_distance", 0.0),
+                "collision_with": cw,
+            })
+
+            if result.get("feasible", False):
+                if feasible_dir is None:
+                    feasible_dir = direction
+                    feasible_result = result
+
+            safe = result.get("max_safe_distance", 0.0)
+            if safe > best_safe:
+                best_safe = safe
+                best_result = result
+                best_dir = direction
+
+    if feasible_dir is not None:
+        return {
+            "feasible": True,
+            "best_direction": feasible_dir,
+            "best_result": feasible_result,
+            "blockers": sorted(blockers),
+            "per_direction": per_direction,
+        }
+
+    if best_dir is None:
+        best_dir = preferred_dir
+        best_result = {
+            "feasible": False,
+            "max_safe_distance": 0.0,
+            "collision_at_step": None,
+            "collision_with": None,
+            "total_steps": 20,
+            "reason": "no candidate succeeded",
+        }
+
+    return {
+        "feasible": False,
+        "best_direction": best_dir,
+        "best_result": best_result,
+        "blockers": sorted(blockers),
+        "per_direction": per_direction,
+    }
 
 
 def _collect_leaf_descendants(sa_name, sub_assemblies, part_map, result_set,

@@ -47,7 +47,8 @@ def _compute_centroid(shape):
 
 def build_disassembly_dag_v2(parts, directions, collision_data,
                               fasteners, max_distance=500.0,
-                              assembly_centroid=None, sub_assemblies=None):
+                              assembly_centroid=None, sub_assemblies=None,
+                              base_explosion_distance=150.0):
     """
     Collision-driven disassembly plan generation — item-by-item removal.
 
@@ -66,6 +67,8 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
         max_distance: movement distance for collision check (mm).
         assembly_centroid: ndarray(3) assembly center point.
         sub_assemblies: list of sub-assembly dicts from flatten_assembly_tree.
+        base_explosion_distance: base distance for animation multiplier (mm,
+            should match frontend ExplosionView.explosionDistance, default 150).
 
     Returns:
         tuple: (stages, verified_directions, distance_multipliers, details)
@@ -115,6 +118,7 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
             result = check_disassembly_path(
                 name, part["shape"], obstacles, verified_dirs[name],
                 max_distance, collision_data=collision_data)
+            used_result = result
 
             if result["feasible"]:
                 stage1.append(name)
@@ -129,6 +133,7 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
                     max_distance, collision_data)
 
                 verified_dirs[name] = best_dir
+                used_result = best_result
                 if best_result["feasible"]:
                     stage1.append(name)
                     details.append({
@@ -142,7 +147,8 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
                     logger.warning("fastener %s not feasible in stage 1, deferred", name)
 
             if name in stage1:
-                distance_multipliers[name] = 1
+                safe_d = used_result.get("max_safe_distance", max_distance)
+                distance_multipliers[name] = max(0.05, safe_d / base_explosion_distance)
 
         stages.append(stage1)
         remaining -= set(stage1)
@@ -252,8 +258,11 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
                         break
 
         if current_stage:
-            for name in current_stage:
-                distance_multipliers[name] = stage_num
+            for d in stage_details:
+                name = d["part"]
+                if name in current_stage:
+                    safe_d = d.get("safe_distance", max_distance)
+                    distance_multipliers[name] = max(0.05, safe_d / base_explosion_distance)
             stages.append(current_stage)
             details.extend(stage_details)
 
