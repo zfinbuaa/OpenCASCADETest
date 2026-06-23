@@ -53,10 +53,10 @@ def _resolve_target_node(target_name, part_map, sub_assemblies):
       3. target_name partially matches some part name → fuzzy match by suffix.
 
     Returns:
-        tuple: (resolved_name, descendants_set_or_None)
+        tuple: (resolved_name, descendants_set_or_None, merged_shape_or_None)
     """
     if target_name in part_map:
-        return target_name, None
+        return target_name, None, None
 
     if sub_assemblies:
         from pipeline.collision_check import _collect_leaf_descendants
@@ -67,20 +67,72 @@ def _resolve_target_node(target_name, part_map, sub_assemblies):
                                           part_map, leaves)
                 valid = [n for n in leaves if n in part_map]
                 if valid:
-                    return valid[0], set(valid)
+                    merged_shape = _merge_part_shapes(part_map, valid)
+                    return valid[0], set(valid), merged_shape
 
     suffix_matches = [n for n in part_map
                       if n.endswith(target_name) or target_name in n]
     if suffix_matches:
         suffix_matches.sort(key=len)
-        return suffix_matches[0], None
+        return suffix_matches[0], None, None
 
-    return target_name, None
+    return target_name, None, None
+
+
+def _merge_part_shapes(part_map, part_names):
+    """
+    Merge multiple leaf part shapes into a single compound for collision check.
+
+    Uses TopoDS_Builder to create a Compound containing all leaf shapes
+    with their world-space transforms applied. This allows the dependency
+    chain analyzer to treat a sub-assembly as a single rigid body.
+
+    Args:
+        part_map: dict of name -> part dict with 'shape' and optional 'transform'.
+        part_names: list of part names to merge.
+
+    Returns:
+        TopoDS_Compound or None if no valid shapes found.
+    """
+    from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Builder
+    from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Transform
+    from OCC.Core.gp import gp_Trsf
+
+    builder = TopoDS_Builder()
+    compound = TopoDS_Compound()
+    builder.MakeCompound(compound)
+    added = 0
+
+    for name in part_names:
+        p = part_map.get(name)
+        if p is None or p.get("shape") is None:
+            continue
+        shape = p["shape"]
+        transform = p.get("transform")
+        if transform and len(transform) == 16:
+            try:
+                import numpy as np
+                mat = np.array(transform, dtype=np.float64).reshape(4, 4, order='F')
+                trsf = gp_Trsf()
+                trsf.SetValues(
+                    float(mat[0][0]), float(mat[1][0]), float(mat[2][0]), float(mat[3][0]),
+                    float(mat[0][1]), float(mat[1][1]), float(mat[2][1]), float(mat[3][1]),
+                    float(mat[0][2]), float(mat[1][2]), float(mat[2][2]), float(mat[3][2]),
+                )
+                shape = BRepBuilderAPI_Transform(shape, trsf, True).Shape()
+            except Exception:
+                pass
+        builder.Add(compound, shape)
+        added += 1
+
+    return compound if added > 0 else None
 
 
 def _simulate_dir_blockers(target_name, part_map, all_part_names,
                             chain_set, skip_set, direction, collision_data,
-                            max_distance):
+                            max_distance, sub_assemblies=None,
+                            sa_bbox_cache=None,
+                            target_shape_override=None):
     """
     Probe one direction and return ALL parts blocking the path.
 
@@ -88,20 +140,35 @@ def _simulate_dir_blockers(target_name, part_map, all_part_names,
     every obstacle that intersects the target's swept volume along the
     given direction.
 
+    Args:
+        target_shape_override: if provided, use this shape for collision check
+            instead of part_map[target_name]["shape"].
+        sub_assemblies: assembly hierarchy for spatial filtering.
+        sa_bbox_cache: precomputed compound bbox cache for spatial filtering.
+
     Returns:
         tuple: (feasible: bool, blockers: list[str], safe_distance: float)
     """
     from pipeline.collision_check import check_disassembly_path
 
-    part = part_map[target_name]
-    obstacles = [(n, part_map[n]["shape"])
-                 for n in all_part_names
-                 if n != target_name
-                 and n not in chain_set
-                 and n not in skip_set]
+    target_shape = target_shape_override if target_shape_override is not None else part_map[target_name]["shape"]
+
+    avail_names = [n for n in all_part_names
+                   if n != target_name
+                   and n not in chain_set
+                   and n not in skip_set]
+
+    if sub_assemblies:
+        from pipeline.collision_check import filter_obstacles_by_compound_bbox
+        obstacles = filter_obstacles_by_compound_bbox(
+            target_name, target_shape, avail_names, part_map,
+            sub_assemblies, collision_data, max_distance,
+            sa_bbox_cache=sa_bbox_cache)
+    else:
+        obstacles = [(n, part_map[n]["shape"]) for n in avail_names]
 
     result = check_disassembly_path(
-        target_name, part["shape"], obstacles, direction,
+        target_name, target_shape, obstacles, direction,
         max_distance, collision_data=collision_data,
         report_all_collisions=True)
 
@@ -126,7 +193,9 @@ def _simulate_dir_blockers(target_name, part_map, all_part_names,
 def _find_optimal_direction(target_name, part_map, all_part_names,
                              verified_dirs, collision_data, max_distance,
                              chain_set, skip_set, depth, max_depth,
-                             centroids, sim_cache, best_so_far=None):
+                             centroids, sim_cache, best_so_far=None,
+                             sub_assemblies=None, sa_bbox_cache=None,
+                             target_shape_override=None):
     """
     Find the optimal disassembly direction for `target_name`.
 
@@ -136,19 +205,23 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
     Args:
         sim_cache: dict to memoize (part_name, frozenset(available_obstacles)) results
         best_so_far: int upper bound (cost from parent) for pruning
+        sub_assemblies: assembly hierarchy for spatial obstacle filtering.
+        sa_bbox_cache: precomputed compound bbox cache for spatial filtering.
+        target_shape_override: if provided, use this shape for collision checks
+            instead of part_map[target_name]["shape"] (for sub-assembly targets).
 
     Returns:
         dict: {
-            "feasible": bool,                    # at least one dir works
-            "direction": [x,y,z],                # chosen direction
-            "blockers": list[str],               # blockers in chosen direction
-            "cost": int,                         # total parts (incl. self)
-            "chain_depth": int,                  # max recursion depth
+            "feasible": bool,
+            "direction": [x,y,z],
+            "blockers": list[str],
+            "cost": int,
+            "chain_depth": int,
             "safe_distance": float,
-            "considered": list[dict],            # per-direction summary
+            "considered": list[dict],
         }
     """
-    from pipeline.collision_check import find_all_blockers
+    from pipeline.collision_check import find_all_blockers, filter_obstacles_by_compound_bbox
 
     if depth > max_depth:
         return {
@@ -173,13 +246,21 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
         sim_cache[cache_key] = result
         return result
 
-    part = part_map[target_name]
+    target_shape = target_shape_override if target_shape_override is not None else part_map[target_name]["shape"]
     preferred_dir = verified_dirs.get(target_name, [0, 1, 0])
-    obstacles = [(n, part_map[n]["shape"]) for n in avail_key]
+
+    avail_names = list(avail_key)
+    if sub_assemblies:
+        obstacles = filter_obstacles_by_compound_bbox(
+            target_name, target_shape, avail_names, part_map,
+            sub_assemblies, collision_data, max_distance,
+            sa_bbox_cache=sa_bbox_cache)
+    else:
+        obstacles = [(n, part_map[n]["shape"]) for n in avail_names]
 
     sweep = find_all_blockers(
-        target_name, part["shape"], obstacles, preferred_dir,
-        max_distance, collision_data)
+        target_name, target_shape, obstacles, preferred_dir,
+        max_distance, collision_data, max_directions=8)
 
     feasible_dirs = []
     blocked_dirs = []
@@ -252,7 +333,9 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
         true_feasible, true_blockers, true_safe = _simulate_dir_blockers(
             target_name, part_map, all_part_names,
             chain_set, skip_set, cand["direction"], collision_data,
-            max_distance)
+            max_distance, sub_assemblies=sub_assemblies,
+            sa_bbox_cache=sa_bbox_cache,
+            target_shape_override=target_shape_override)
 
         if true_feasible:
             cand_result = {
@@ -300,7 +383,9 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
                 verified_dirs, collision_data, max_distance,
                 sim_chain_set, skip_set, depth + 1, max_depth,
                 centroids, sim_cache,
-                best_so_far=budget - cumulative_cost)
+                best_so_far=budget - cumulative_cost,
+                sub_assemblies=sub_assemblies,
+                sa_bbox_cache=sa_bbox_cache)
 
             cumulative_cost += sub["cost"]
             max_sub_depth = max(max_sub_depth, sub["chain_depth"])
@@ -390,7 +475,7 @@ def compute_dependency_chain(parts, directions, collision_data,
     """
     part_map = {p["name"]: p for p in parts}
 
-    resolved_target, target_descendants = _resolve_target_node(
+    resolved_target, target_descendants, merged_shape = _resolve_target_node(
         target_name, part_map, sub_assemblies)
 
     if resolved_target not in part_map:
@@ -408,6 +493,8 @@ def compute_dependency_chain(parts, directions, collision_data,
             target_name, len(target_descendants)))
         sys.stdout.flush()
 
+    target_shape = merged_shape if merged_shape is not None else part_map[resolved_target]["shape"]
+
     verified_dirs = dict(directions)
     chain_order = []
     chain_set = set()
@@ -416,25 +503,55 @@ def compute_dependency_chain(parts, directions, collision_data,
     centroids = _precompute_centroids(part_map)
 
     skip_for_target = set(target_descendants) if target_descendants else set()
+    node_is_sub_assembly = (target_descendants is not None and len(target_descendants) > 1)
+
+    sa_bbox_cache = None
+    if sub_assemblies:
+        from pipeline.collision_check import precompute_compound_bbox_cache
+        try:
+            sa_bbox_cache = precompute_compound_bbox_cache(
+                sub_assemblies, part_map, collision_data)
+        except Exception:
+            pass
 
     _resolve_chain(resolved_target, part_map, set(part_map.keys()),
                    verified_dirs, collision_data, max_distance,
                    chain_order, chain_set, details, 0, max_recursion,
-                   centroids, skip_for_target, optimize_direction)
+                   centroids, skip_for_target, optimize_direction,
+                   sub_assemblies=sub_assemblies,
+                   sa_bbox_cache=sa_bbox_cache,
+                   target_shape_override=target_shape)
 
-    if target_descendants:
+    if node_is_sub_assembly:
+        # For sub-assembly targets, treat the entire node as a single unit.
+        # Remove individual descendant leaves from the chain output and replace
+        # with the original target name as a group.
+        resolved_set = set(target_descendants)
+        filtered_order = []
+        for name in chain_order:
+            if name not in resolved_set:
+                filtered_order.append(name)
+        filtered_order.append(target_name)
+        chain_order = filtered_order
+
+        already_inclusion = False
+        for d in details:
+            if d.get("part") in resolved_set:
+                detail_name = d.get("part")
+                d["part"] = detail_name
+        details.append({
+            "part": target_name,
+            "stage": len(chain_order),
+            "feasible": True,
+            "direction": verified_dirs.get(resolved_target, [0, 1, 0]),
+            "safe_distance": max_distance,
+            "depth": 0,
+            "note": "treated as unit ({} leaves from '{}')".format(
+                len(target_descendants), target_name),
+        })
         for leaf in target_descendants:
-            if leaf != resolved_target and leaf not in chain_set:
-                chain_order.append(leaf)
+            if leaf not in chain_set:
                 chain_set.add(leaf)
-                details.append({
-                    "part": leaf,
-                    "stage": len(chain_order),
-                    "feasible": True,
-                    "direction": verified_dirs.get(leaf, [0, 1, 0]),
-                    "safe_distance": max_distance,
-                    "note": "part of target sub-assembly '{}'".format(target_name),
-                })
 
     stages = [[name] for name in chain_order]
     distance_multipliers = {}
@@ -452,12 +569,21 @@ def _resolve_chain(target_name, part_map, all_part_names,
                    verified_dirs, collision_data, max_distance,
                    chain_order, chain_set, details, depth, max_depth,
                    centroids, skip_obstacles=None,
-                   optimize_direction=True):
+                   optimize_direction=True,
+                   sub_assemblies=None, sa_bbox_cache=None,
+                   target_shape_override=None):
     """
     Recursively resolve the dependency chain for a target part.
 
     With optimize_direction=True (default), chooses the disassembly direction
     that minimizes total recursive removal count.
+
+    Args:
+        sub_assemblies: assembly hierarchy for spatial obstacle filtering.
+        sa_bbox_cache: precomputed compound bbox cache for spatial filtering.
+        target_shape_override: if provided, use this shape instead of
+            part_map[target_name]["shape"] for collision checking (used for
+            sub-assembly targets that are treated as a single rigid body).
     """
     if target_name in chain_set:
         return
@@ -471,6 +597,7 @@ def _resolve_chain(target_name, part_map, all_part_names,
         return
 
     skip_set = skip_obstacles or set()
+    target_shape = target_shape_override if target_shape_override is not None else part_map[target_name]["shape"]
 
     if optimize_direction:
         sim_cache = {}
@@ -478,7 +605,10 @@ def _resolve_chain(target_name, part_map, all_part_names,
             target_name, part_map, all_part_names,
             verified_dirs, collision_data, max_distance,
             chain_set, skip_set, depth, max_depth,
-            centroids, sim_cache)
+            centroids, sim_cache,
+            sub_assemblies=sub_assemblies,
+            sa_bbox_cache=sa_bbox_cache,
+            target_shape_override=target_shape)
 
         verified_dirs[target_name] = plan["direction"]
 
@@ -513,19 +643,27 @@ def _resolve_chain(target_name, part_map, all_part_names,
                            chain_order, chain_set, details,
                            depth + 1, max_depth, centroids,
                            skip_obstacles=skip_set,
-                           optimize_direction=optimize_direction)
+                           optimize_direction=optimize_direction,
+                           sub_assemblies=sub_assemblies,
+                           sa_bbox_cache=sa_bbox_cache)
 
         if target_name in chain_set:
             return
 
-        from pipeline.collision_check import check_disassembly_path
-        recheck_obstacles = [(n, part_map[n]["shape"])
-                             for n in all_part_names
-                             if n != target_name
-                             and n not in chain_set
-                             and n not in skip_set]
+        from pipeline.collision_check import check_disassembly_path, filter_obstacles_by_compound_bbox
+        recheck_names = [n for n in all_part_names
+                         if n != target_name
+                         and n not in chain_set
+                         and n not in skip_set]
+        if sub_assemblies:
+            recheck_obstacles = filter_obstacles_by_compound_bbox(
+                target_name, target_shape, recheck_names, part_map,
+                sub_assemblies, collision_data, max_distance,
+                sa_bbox_cache=sa_bbox_cache)
+        else:
+            recheck_obstacles = [(n, part_map[n]["shape"]) for n in recheck_names]
         recheck = check_disassembly_path(
-            target_name, part_map[target_name]["shape"],
+            target_name, target_shape,
             recheck_obstacles, plan["direction"],
             max_distance, collision_data=collision_data,
             report_all_collisions=True)
@@ -550,23 +688,28 @@ def _resolve_chain(target_name, part_map, all_part_names,
         })
         return
 
-    from pipeline.collision_check import find_all_blockers
+    from pipeline.collision_check import find_all_blockers, filter_obstacles_by_compound_bbox
 
-    part = part_map[target_name]
     preferred_dir = verified_dirs.get(target_name, [0, 1, 0])
-    obstacles = [(n, part_map[n]["shape"])
-                 for n in all_part_names
-                 if n != target_name
-                 and n not in chain_set
-                 and n not in skip_set]
+    obstacle_names = [n for n in all_part_names
+                     if n != target_name
+                     and n not in chain_set
+                     and n not in skip_set]
+    if sub_assemblies:
+        obstacles = filter_obstacles_by_compound_bbox(
+            target_name, target_shape, obstacle_names, part_map,
+            sub_assemblies, collision_data, max_distance,
+            sa_bbox_cache=sa_bbox_cache)
+    else:
+        obstacles = [(n, part_map[n]["shape"]) for n in obstacle_names]
 
     sys.stdout.write("  [depth={}] (legacy) resolving '{}' against {} obstacles...\n".format(
         depth, target_name, len(obstacles)))
     sys.stdout.flush()
 
     result = find_all_blockers(
-        target_name, part["shape"], obstacles, preferred_dir,
-        max_distance, collision_data)
+        target_name, target_shape, obstacles, preferred_dir,
+        max_distance, collision_data, max_directions=8)
 
     verified_dirs[target_name] = result["best_direction"]
 
@@ -631,7 +774,7 @@ def _resolve_chain(target_name, part_map, all_part_names,
                          and n not in skip_set]
 
     recheck = find_all_blockers(
-        target_name, part["shape"], recheck_obstacles,
+        target_name, target_shape, recheck_obstacles,
         verified_dirs.get(target_name, result["best_direction"]),
         max_distance, collision_data)
 

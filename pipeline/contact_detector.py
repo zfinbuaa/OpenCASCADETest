@@ -347,10 +347,17 @@ def detect_contacts(parts, progress_callback=None, intra_parent_only=False,
             if local_cd:
                 tight_pairs = []
                 for i, j in candidate_pairs:
-                    has_local = (local_cd is not None and i in local_cd and j in local_cd
+                    has_local = (0 <= i < len(local_cd) and 0 <= j < len(local_cd)
                                  and local_cd[i] is not None and local_cd[j] is not None
                                  and local_cd[i].tree is not None and local_cd[j].tree is not None)
-                    overlap_ok = (not has_local) or _aabb_overlap_local(local_cd[i], local_cd[j])
+                    if has_local:
+                        overlap_ok = _aabb_overlap_local(
+                            local_cd[i].aabb_min - CONTACT_THRESHOLD,
+                            local_cd[i].aabb_max + CONTACT_THRESHOLD,
+                            local_cd[j].aabb_min - CONTACT_THRESHOLD,
+                            local_cd[j].aabb_max + CONTACT_THRESHOLD)
+                    else:
+                        overlap_ok = True
                     if overlap_ok:
                         tight_pairs.append((i, j))
                 total_tight += len(tight_pairs)
@@ -455,17 +462,15 @@ def detect_contacts(parts, progress_callback=None, intra_parent_only=False,
 
 
 def _compute_avg_normal(normals):
-    """Compute average normal from a list of normals."""
+    """Compute average normal from a list of normals. Returns list[float] of length 3."""
     avg_normal = np.mean(normals, axis=0).tolist()
     length = (avg_normal[0] ** 2 + avg_normal[1] ** 2 + avg_normal[2] ** 2) ** 0.5
     if length < 1e-9:
         logger.warning("_compute_avg_normal produced zero vector")
-        return np.array([0.0, 1.0, 0.0])
-    if length > 1e-10:
-        return [avg_normal[0] / length,
-                avg_normal[1] / length,
-                avg_normal[2] / length]
-    return avg_normal
+        return [0.0, 1.0, 0.0]
+    return [avg_normal[0] / length,
+            avg_normal[1] / length,
+            avg_normal[2] / length]
 
 
 def get_contact_graph(contacts):

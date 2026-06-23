@@ -48,7 +48,8 @@ def _compute_centroid(shape):
 def build_disassembly_dag_v2(parts, directions, collision_data,
                               fasteners, max_distance=500.0,
                               assembly_centroid=None, sub_assemblies=None,
-                              base_explosion_distance=150.0):
+                              base_explosion_distance=150.0,
+                              correct_directions=True):
     """
     Collision-driven disassembly plan generation — item-by-item removal.
 
@@ -69,6 +70,10 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
         sub_assemblies: list of sub-assembly dicts from flatten_assembly_tree.
         base_explosion_distance: base distance for animation multiplier (mm,
             should match frontend ExplosionView.explosionDistance, default 150).
+        correct_directions: if True (disassembly plan), search for alternative
+            directions when the initial direction is blocked. If False (explosion
+            path), keep the geometrically computed direction and defer the part
+            to a later stage instead.
 
     Returns:
         tuple: (stages, verified_directions, distance_multipliers, details)
@@ -95,6 +100,15 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
     for name in part_names:
         diff = centroids[name] - assembly_centroid
         distances_to_center[name] = float(np.linalg.norm(diff))
+
+    hierarchy_depth = {}
+    if sub_assemblies:
+        for p in parts:
+            hierarchy_depth[p["name"]] = len(p.get("ancestors", []))
+    if not hierarchy_depth:
+        hierarchy_depth = {name: 0 for name in part_names}
+
+    max_depth = max(hierarchy_depth.values()) if hierarchy_depth else 1
 
     verified_dirs = dict(directions)
     remaining = set(part_names)
@@ -127,7 +141,7 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
                     "direction": verified_dirs[name],
                     "safe_distance": result["max_safe_distance"],
                 })
-            else:
+            elif correct_directions:
                 best_dir, best_result = find_best_feasible_direction(
                     name, part["shape"], obstacles, verified_dirs[name],
                     max_distance, collision_data)
@@ -145,10 +159,15 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
                     })
                 else:
                     logger.warning("fastener %s not feasible in stage 1, deferred", name)
+            else:
+                logger.warning("fastener %s not feasible in stage 1, deferring with original direction", name)
+                used_result = result
 
             if name in stage1:
                 safe_d = used_result.get("max_safe_distance", max_distance)
-                distance_multipliers[name] = max(0.05, safe_d / base_explosion_distance)
+                depth = hierarchy_depth.get(name, 0)
+                depth_factor = 1.0 + (depth / max(max_depth, 1)) * 0.5
+                distance_multipliers[name] = max(0.05, (safe_d / base_explosion_distance) * depth_factor)
 
         stages.append(stage1)
         remaining -= set(stage1)
@@ -161,10 +180,38 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
     stage_num = 2
     max_stages = len(part_names)
 
+    def _retry_deferred(deferred_list, current, stage_num_, stage_dets):
+        """Re-check all deferred parts against the current (reduced) obstacle set.
+        Returns True if any deferred part was promoted to current_stage."""
+        promoted = False
+        retry_candidates = list(deferred_list)
+        for dname in retry_candidates:
+            dpart = part_map[dname]
+            dobjs = filter_obstacles_by_compound_bbox(
+                dname, dpart["shape"], list(remaining),
+                part_map, sub_assemblies, collision_data,
+                max_distance, sa_bbox_cache=sa_bbox_cache)
+            dresult = check_disassembly_path(
+                dname, dpart["shape"], dobjs, verified_dirs.get(dname, [0, 1, 0]),
+                max_distance, collision_data=collision_data)
+            if dresult["feasible"]:
+                deferred_list.remove(dname)
+                current.append(dname)
+                remaining.discard(dname)
+                stage_dets.append({
+                    "part": dname, "stage": stage_num_, "feasible": True,
+                    "direction": verified_dirs.get(dname, [0, 1, 0]),
+                    "safe_distance": dresult["max_safe_distance"],
+                })
+                promoted = True
+        return promoted
+
     while remaining and stage_num <= max_stages:
         sorted_remaining = sorted(remaining,
-                                  key=lambda n: distances_to_center.get(n, 0),
-                                  reverse=True)
+                                  key=lambda n: (
+                                      -distances_to_center.get(n, 0),
+                                      hierarchy_depth.get(n, 0),
+                                  ))
 
         sys.stdout.write("  Stage {}: checking {} remaining parts "
                          "(item-by-item)...\n".format(
@@ -210,31 +257,53 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
                     "direction": verified_dirs[name],
                     "safe_distance": result["max_safe_distance"],
                 })
+                if not correct_directions and deferred:
+                    while _retry_deferred(deferred, current_stage, stage_num, stage_details):
+                        pass
             else:
-                best_dir, best_result = find_best_feasible_direction(
-                    name, part["shape"], obstacles, verified_dirs[name],
-                    max_distance, collision_data)
+                deferred.append(name)
+                if correct_directions:
+                    best_dir, best_result = find_best_feasible_direction(
+                        name, part["shape"], obstacles, verified_dirs[name],
+                        max_distance, collision_data)
 
-                if best_result["feasible"]:
-                    verified_dirs[name] = best_dir
-                    current_stage.append(name)
-                    remaining.discard(name)
-                    stage_details.append({
-                        "part": name, "stage": stage_num, "feasible": True,
-                        "direction": best_dir,
-                        "safe_distance": best_result["max_safe_distance"],
-                    })
+                    if best_result["feasible"]:
+                        verified_dirs[name] = best_dir
+                        deferred.remove(name)
+                        current_stage.append(name)
+                        remaining.discard(name)
+                        stage_details.append({
+                            "part": name, "stage": stage_num, "feasible": True,
+                            "direction": best_dir,
+                            "safe_distance": best_result["max_safe_distance"],
+                        })
+                        if not correct_directions and deferred:
+                            while _retry_deferred(deferred, current_stage, stage_num, stage_details):
+                                pass
+                    else:
+                        safe_d = best_result.get("max_safe_distance", 0)
+                        if safe_d > best_deferred_safe:
+                            best_deferred_safe = safe_d
+                            best_deferred = name
+                            best_deferred_dir = best_dir
+                        stage_details.append({
+                            "part": name, "stage": stage_num, "feasible": False,
+                            "direction": best_dir,
+                            "safe_distance": safe_d,
+                            "collision_with": best_result.get("collision_with"),
+                        })
                 else:
-                    deferred.append(name)
-                    if best_result["max_safe_distance"] > best_deferred_safe:
-                        best_deferred_safe = best_result["max_safe_distance"]
+                    safe_d = result.get("max_safe_distance", 0)
+                    if safe_d > best_deferred_safe:
+                        best_deferred_safe = safe_d
                         best_deferred = name
-                        best_deferred_dir = best_dir
+                        best_deferred_dir = verified_dirs.get(name, [0, 1, 0])
                     stage_details.append({
                         "part": name, "stage": stage_num, "feasible": False,
-                        "direction": best_dir,
-                        "safe_distance": best_result["max_safe_distance"],
-                        "collision_with": best_result.get("collision_with"),
+                        "direction": verified_dirs.get(name, [0, 1, 0]),
+                        "safe_distance": safe_d,
+                        "collision_with": result.get("collision_with"),
+                        "deferred": True,
                     })
 
             if checked % 10 == 0:
@@ -262,7 +331,12 @@ def build_disassembly_dag_v2(parts, directions, collision_data,
                 name = d["part"]
                 if name in current_stage:
                     safe_d = d.get("safe_distance", max_distance)
-                    distance_multipliers[name] = max(0.05, safe_d / base_explosion_distance)
+                    depth = hierarchy_depth.get(name, 0)
+                    depth_factor = 1.0 + (depth / max(max_depth, 1)) * 0.5
+                    stage_factor = max(1.0, stage_num * 0.8)
+                    distance_multipliers[name] = max(
+                        0.05,
+                        (safe_d / base_explosion_distance) * depth_factor * stage_factor)
             stages.append(current_stage)
             details.extend(stage_details)
 

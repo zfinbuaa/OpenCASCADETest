@@ -2,12 +2,13 @@
  * Annotation — 白底黑字圆圈标注 + 水平直线引线。
  *
  * 左右双列布局：标签数量左右均衡（奇数时左侧多一个），
- * 引线为水平直线，圆圈为白底黑字黑圈。
+ * 引线为水平直线，末端短垂直线指向零件。
+ * 每个被勾选的节点视为一个整体，生成一个标注。
  */
 import * as THREE from '../node_modules/three/build/three.module.js';
 
-const CIRCLE_R = 12;          // 圆圈半径
-const COLUMN_MARGIN = 60;     // 左右列距离视口边缘
+const CIRCLE_R = 12;
+const COLUMN_MARGIN = 60;
 const LINE_COLOR = '#222222';
 
 export class Annotation {
@@ -32,18 +33,19 @@ export class Annotation {
     this._hiddenPartIds = ids instanceof Set ? ids : new Set(ids || []);
   }
 
-  setParts(parts, mergedPartIds = null) {
-    if (mergedPartIds && mergedPartIds instanceof Set && mergedPartIds.size > 0) {
-      this.annotations = [{
-        partId: '__merged__',
-        partName: '[编组]',
+  setParts(parts, checkedNodes = null) {
+    if (checkedNodes && checkedNodes.length > 0) {
+      this.annotations = checkedNodes.map((node, i) => ({
+        partId: node.nodeId,
+        partIds: node.partIds,
+        partName: node.nodeId,
         worldPos: new THREE.Vector3(),
-        index: 0,
-        _mergedIds: new Set(mergedPartIds),
-      }];
+        index: i,
+      }));
     } else {
       this.annotations = parts.map((p, i) => ({
         partId: p.id || p.name,
+        partIds: new Set([p.id || p.name]),
         partName: p.name || p.id,
         worldPos: new THREE.Vector3(),
         index: i,
@@ -54,32 +56,21 @@ export class Annotation {
   updatePositions() {
     if (!this.annotations) return;
     for (const ann of this.annotations) {
-      if (ann._mergedIds) {
-        const box = new THREE.Box3();
-        for (const mesh of this._allMeshes()) {
-          if (ann._mergedIds.has(mesh.userData.partId) && mesh.visible) {
-            box.expandByObject(mesh);
-          }
+      const partIds = ann.partIds || new Set([ann.partId]);
+      let anyVisible = false;
+      const box = new THREE.Box3();
+      this.scene.traverse((child) => {
+        if (child.isMesh && partIds.has(child.userData.partId)) {
+          if (this._hiddenPartIds.has(child.userData.partId)) return;
+          if (!child.visible) return;
+          box.expandByObject(child);
+          anyVisible = true;
         }
-        if (box.isEmpty()) continue;
+      });
+      if (anyVisible && !box.isEmpty()) {
         box.getCenter(ann.worldPos);
-      } else {
-        if (this._hiddenPartIds.has(ann.partId)) continue;
-        const mesh = this._findMesh(ann.partId);
-        if (mesh && mesh.visible) {
-          const box = new THREE.Box3().setFromObject(mesh);
-          box.getCenter(ann.worldPos);
-        }
       }
     }
-  }
-
-  _allMeshes() {
-    const meshes = [];
-    this.scene.traverse((child) => {
-      if (child.isMesh) meshes.push(child);
-    });
-    return meshes;
   }
 
   draw() {
@@ -95,10 +86,8 @@ export class Annotation {
     const ctx = this._ctx;
     ctx.clearRect(0, 0, w, h);
 
-    // Update world positions from scene meshes
     this.updatePositions();
 
-    // Project each part to screen space
     const halfW = w / 2;
     const halfH = h / 2;
     const screenPoints = [];
@@ -114,7 +103,6 @@ export class Annotation {
 
     if (screenPoints.length === 0) return;
 
-    // Sort by vertical position for even distribution
     screenPoints.sort((a, b) => a.sy - b.sy);
 
     const n = screenPoints.length;
@@ -124,19 +112,26 @@ export class Annotation {
     const leftX = COLUMN_MARGIN;
     const rightX = w - COLUMN_MARGIN;
 
-    // Vertical spacing
     const topPad = 40;
     const botPad = 40;
     const availH = h - topPad - botPad;
 
     function drawOne(ctx, circleX, targetX, targetY, cy, number) {
-      // Horizontal line from circle edge to target
+      const dir = targetX > circleX ? 1 : -1;
+      const horStartX = circleX + dir * (CIRCLE_R + 1);
+
       ctx.beginPath();
       ctx.strokeStyle = LINE_COLOR;
       ctx.lineWidth = 1.5;
-      const dir = targetX > circleX ? 1 : -1;
-      ctx.moveTo(circleX + dir * (CIRCLE_R + 1), cy);
-      ctx.lineTo(targetX, targetY);
+
+      const horEndX = targetX - dir * 6;
+      ctx.moveTo(horStartX, cy);
+      ctx.lineTo(horEndX, cy);
+
+      if (Math.abs(targetY - cy) > 2) {
+        ctx.lineTo(horEndX, targetY);
+      }
+
       ctx.stroke();
 
       // White circle
@@ -156,7 +151,6 @@ export class Annotation {
       ctx.fillText(String(number), circleX, cy);
     }
 
-    // Left column
     for (let i = 0; i < leftCount; i++) {
       const { sx, sy, ann } = screenPoints[i];
       const cy = topPad + (availH / (leftCount + 1)) * (i + 1);
@@ -164,7 +158,6 @@ export class Annotation {
       drawOne(ctx, leftX, sx, sy, cy, number);
     }
 
-    // Right column
     for (let i = 0; i < rightCount; i++) {
       const { sx, sy, ann } = screenPoints[leftCount + i];
       const cy = topPad + (availH / (rightCount + 1)) * (i + 1);

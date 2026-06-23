@@ -456,7 +456,7 @@ def _safe_coarse_step_size(part_aabb, obstacle_aabbs):
             e = hi - lo
             if e > 0:
                 min_extent = min(min_extent, e)
-    return max(0.5, min_extent * 0.5)
+    return max(5.0, min_extent * 0.5)
 
 
 def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
@@ -464,6 +464,9 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
                      report_all_collisions=False):
     """Mesh-based collision check with AABB pre-filter and binary search."""
     part_data = collision_data.get(part_name)
+
+    if part_data is None and part_shape is not None:
+        part_data = MeshCollisionData(part_shape, linear_deflection=2.0)
 
     if part_data is None or part_data.vertices is None or part_data.tree is None:
         return _check_path_brep(
@@ -505,6 +508,103 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
     collision_name = None
     collision_names_set = set()
     last_safe_step = 0
+
+    if coarse_steps > 50:
+        wide_steps = 10
+        wide_step_size = max_distance / wide_steps
+        wide_collision = -1
+        for wstep in range(1, wide_steps + 1):
+            wdist = wstep * wide_step_size
+            woffset = dir_np * wdist
+            wmoved_aabb_min = base_aabb_min + woffset
+            wmoved_aabb_max = base_aabb_max + woffset
+            wmoved_tree = _translate_aabb_tree(base_tree, woffset)
+            wmoved_verts = base_verts + woffset
+            wht = False
+            for other_name, obs_v, obs_t, obs_tree, obs_amin, obs_amax, obs_shape in obs_data_list:
+                if obs_tree is not None and obs_amin is not None:
+                    if _check_mesh_intersection(wmoved_verts, part_data.triangles,
+                                                wmoved_tree, wmoved_aabb_min, wmoved_aabb_max,
+                                                obs_v, obs_t, obs_tree,
+                                                obs_amin, obs_amax):
+                        wht = True
+                        if collision_name is None:
+                            collision_name = other_name
+                        collision_names_set.add(other_name)
+                        if not report_all_collisions:
+                            break
+                else:
+                    with OCC_BREP_LOCK:
+                        vec = gp_Vec(dir_np[0] * wdist, dir_np[1] * wdist, dir_np[2] * wdist)
+                        trsf = gp_Trsf()
+                        trsf.SetTranslation(vec)
+                        wmoved_shape = BRepBuilderAPI_Transform(part_shape, trsf).Shape()
+                        interferes = _has_interference_brep(wmoved_shape, obs_shape, part_data.volume)
+                    if interferes:
+                        wht = True
+                        if collision_name is None:
+                            collision_name = other_name
+                        collision_names_set.add(other_name)
+                        if not report_all_collisions:
+                            break
+            if wht:
+                wide_collision = wstep
+                if not report_all_collisions:
+                    break
+                break
+            last_safe_step = wstep
+
+        if wide_collision < 0:
+            return {
+                "feasible": True,
+                "max_safe_distance": max_distance,
+                "collision_at_step": -1,
+                "collision_with": None,
+                "collision_names": [],
+                "total_steps": steps,
+            }
+
+        lo = (wide_collision - 1) * wide_step_size
+        hi = wide_collision * wide_step_size
+        for _ in range(5):
+            mid = (lo + hi) / 2.0
+            offset = dir_np * mid
+            moved_verts = base_verts + offset
+            moved_tree = _translate_aabb_tree(base_tree, offset)
+            moved_aabb_min = base_aabb_min + offset
+            moved_aabb_max = base_aabb_max + offset
+            hit = False
+            for other_name, obs_v, obs_t, obs_tree, obs_amin, obs_amax, obs_shape in obs_data_list:
+                if obs_tree is not None and obs_amin is not None:
+                    if _check_mesh_intersection(moved_verts, part_data.triangles,
+                                                moved_tree, moved_aabb_min, moved_aabb_max,
+                                                obs_v, obs_t, obs_tree,
+                                                obs_amin, obs_amax):
+                        hit = True
+                        break
+                else:
+                    with OCC_BREP_LOCK:
+                        vec = gp_Vec(dir_np[0] * mid, dir_np[1] * mid, dir_np[2] * mid)
+                        trsf = gp_Trsf()
+                        trsf.SetTranslation(vec)
+                        moved_shape = BRepBuilderAPI_Transform(part_shape, trsf).Shape()
+                        interferes = _has_interference_brep(moved_shape, obs_shape, part_data.volume)
+                    if interferes:
+                        hit = True
+                        break
+            if hit:
+                hi = mid
+            else:
+                lo = mid
+
+        return {
+            "feasible": False,
+            "max_safe_distance": lo,
+            "collision_at_step": wide_collision,
+            "collision_with": collision_name,
+            "collision_names": sorted(collision_names_set),
+            "total_steps": steps,
+        }
 
     for step in range(1, coarse_steps + 1):
         dist = step * step_size
@@ -745,16 +845,17 @@ def find_best_feasible_direction(part_name, part_shape, obstacle_shapes,
 
 def find_all_blockers(part_name, part_shape, obstacle_shapes,
                       preferred_dir, max_distance=500.0,
-                      collision_data=None):
+                      collision_data=None, max_directions=None):
     """
-    Search all 26 candidate directions and collect every blocking part.
+    Search candidate directions and collect every blocking part.
 
     Unlike find_best_feasible_direction (which stops at the first feasible
-    direction and cancels remaining tasks), this function completes all 26
+    direction and cancels remaining tasks), this function completes all
     checks to gather the union of all blockers across all directions.
 
-    This is essential for the dependency chain analyzer to recursively
-    resolve every part that obstructs the target.
+    Args:
+        max_directions: if set, limit to the top-N most similar directions
+            (by cosine similarity to preferred_dir). Default: all 26.
 
     Returns:
         dict: {
@@ -778,6 +879,9 @@ def find_all_blockers(part_name, part_shape, obstacle_shapes,
         sorted_candidates.append((dot, cand.tolist()))
 
     sorted_candidates.sort(key=lambda x: -x[0])
+
+    if max_directions is not None and max_directions > 0:
+        sorted_candidates = sorted_candidates[:max_directions]
 
     blockers = set()
     per_direction = []
@@ -863,29 +967,62 @@ def find_all_blockers(part_name, part_shape, obstacle_shapes,
 
 def _collect_leaf_descendants(sa_name, sub_assemblies, part_map, result_set,
                               memo=None):
-    """Recursively collect all leaf part names under a sub-assembly."""
+    """Iteratively collect all leaf part names under a sub-assembly.
+
+    Uses explicit stack-based traversal (post-order) to avoid recursion
+    depth limits on deeply nested assembly trees.
+    """
     if memo is not None:
         if sa_name in memo:
             if memo[sa_name] is not None:
                 result_set.update(memo[sa_name])
             return
+
+    children_map = {}
+    for sa in sub_assemblies:
+        children_map[sa["name"]] = sa.get("child_names", [])
+
+    if sa_name not in children_map:
+        return
+
+    stack = [(sa_name, 0)]
+    if memo is not None:
         memo[sa_name] = None
 
-    sa_leaves = set()
-    for sa in sub_assemblies:
-        if sa["name"] == sa_name:
-            for child in sa.get("child_names", []):
+    while stack:
+        name, idx = stack[-1]
+        children = children_map.get(name, [])
+
+        if memo is not None and name in memo and memo[name] is not None:
+            stack.pop()
+            continue
+
+        if idx >= len(children):
+            stack.pop()
+            collected = set()
+            for child in children:
                 if child in part_map:
-                    sa_leaves.add(child)
-                else:
-                    child_set = set()
-                    _collect_leaf_descendants(child, sub_assemblies,
-                                              part_map, child_set, memo)
-                    sa_leaves.update(child_set)
-            break
-    if memo is not None:
-        memo[sa_name] = sa_leaves
-    result_set.update(sa_leaves)
+                    collected.add(child)
+                elif memo is not None and child in memo and memo[child] is not None:
+                    collected.update(memo[child])
+            if memo is not None:
+                memo[name] = collected
+            result_set.update(collected)
+            continue
+
+        child = children[idx]
+        stack[-1] = (name, idx + 1)
+
+        if child in part_map:
+            continue
+        if memo is not None and child in memo:
+            continue
+        if child not in children_map:
+            continue
+
+        if memo is not None:
+            memo[child] = None
+        stack.append((child, 0))
 
 
 def filter_obstacles_by_compound_bbox(part_name, part_shape, remaining_names,

@@ -14,7 +14,7 @@
     "productName": "数模自动拆装工具",
     "executableName": "AutoModel",
     "directories": {
-      "output": "release_new"
+      "output": "release"
     },
     "extraResources": [
       {
@@ -30,15 +30,8 @@
       "bodies/**/*"
     ],
     "win": {
-      "target": "nsis",
-      "icon": null
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "installerSidebar": null,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "target": "dir",
+      "icon": "app_icon.ico"
     }
   },
   "dependencies": {

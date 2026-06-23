@@ -47,10 +47,12 @@ const shared = {
   selectedNode: null,
   sourceStpPath: null,
   checkedPartIds: new Set(),
+  checkedNodes: [],
   hiddenPartIds: new Set(),
   bomEntries: [],
   bomSourcePath: null,
   bomModelsDir: null,
+  explosionCenter: null,
 };
 
 // ── Per-tab state ─────────────────────────────────────────
@@ -192,15 +194,6 @@ function renderPositionPanel() {
   h += '</div>';
   h += '<div class="section-title">BOM 条目</div>';
   h += '<div id="bom-list" style="margin:4px 12px;max-height:120px;overflow-y:auto;font-size:11px;color:#ccc;"></div>';
-  h += '<div class="section-title">视角</div>';
-  h += '<div class="btn-group">';
-  h += '<button class="btn btn-outline" id="btn-vfront">前视</button>';
-  h += '<button class="btn btn-outline" id="btn-vback">后视</button>';
-  h += '<button class="btn btn-outline" id="btn-vleft">左视</button>';
-  h += '<button class="btn btn-outline" id="btn-vright">右视</button>';
-  h += '<button class="btn btn-outline" id="btn-vtop">俯视</button>';
-  h += '<button class="btn btn-outline" id="btn-viso">等轴测</button>';
-  h += '</div>';
   h += '<div class="section-title">标注导出</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-outline" id="btn-annot-show">显示标注</button>';
@@ -218,31 +211,26 @@ function renderExplosionPanel() {
   h += '<button class="btn btn-pri" id="btn-load-bom-explosion">加载 BOM + 分析</button>';
   h += '<button class="btn btn-outline" id="btn-load">加载 JSON</button>';
   h += '</div>';
+  h += '<div class="section-title">爆炸中心</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-set-center">选中爆炸中心</button>';
+  h += '<button class="btn btn-outline" id="btn-clear-center">清除中心</button>';
+  h += '</div>';
+  h += '<div id="center-display" style="margin:4px 12px;font-size:11px;color:#7ec8e3;">未设置 (使用几何重心)</div>';
+  h += '<div class="section-title">生成爆炸</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-pri" id="btn-gen-explosion">生成爆炸视图</button>';
+  h += '</div>';
   h += '<div class="section-title">爆炸控制</div>';
   h += '<div class="slider-row"><span>距离</span><input type="range" id="slider-dist" min="10" max="2000" value="150" step="5"><span id="val-dist">150</span>mm</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-pri" id="btn-explode">逐阶段爆炸</button>';
   h += '<button class="btn btn-outline" id="btn-explode-instant">一键爆炸</button>';
   h += '<button class="btn btn-outline" id="btn-reset">复位</button></div>';
-  h += '<div class="section-title">拆卸演示</div>';
-  h += '<div class="btn-group">';
-  h += '<button class="btn btn-pri" id="btn-disassemble">逐件拆卸演示</button>';
-  h += '<button class="btn btn-outline" id="btn-step">单步拆卸</button>';
-  h += '<button class="btn btn-outline" id="btn-restore">复位全部</button>';
-  h += '</div>';
   h += '<div class="section-title">手动移动</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-outline" id="btn-manual-on">开启拖拽</button>';
   h += '<button class="btn btn-outline" id="btn-manual-off">关闭拖拽</button></div>';
-  h += '<div class="section-title">视角</div>';
-  h += '<div class="btn-group">';
-  h += '<button class="btn btn-outline" id="btn-vfront">前视</button>';
-  h += '<button class="btn btn-outline" id="btn-vback">后视</button>';
-  h += '<button class="btn btn-outline" id="btn-vleft">左视</button>';
-  h += '<button class="btn btn-outline" id="btn-vright">右视</button>';
-  h += '<button class="btn btn-outline" id="btn-vtop">俯视</button>';
-  h += '<button class="btn btn-outline" id="btn-viso">等轴测</button>';
-  h += '</div>';
   h += '<div class="section-title">标注导出</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-outline" id="btn-annot-show">显示标注</button>';
@@ -268,10 +256,6 @@ function renderDisassemblyPanel() {
   h += '<div class="btn-group">';
   h += '<button class="btn btn-outline" id="btn-pipeline-node">选中节点 → 生成拆装方案</button>';
   h += '</div>';
-  h += '<div class="section-title">爆炸</div>';
-  h += '<div class="btn-group">';
-  h += '<button class="btn btn-pri" id="btn-explode">逐阶段爆炸</button>';
-  h += '<button class="btn btn-outline" id="btn-reset">复位</button></div>';
   h += '<div class="section-title">拆卸演示</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-pri" id="btn-disassemble">逐件拆卸演示</button>';
@@ -290,15 +274,6 @@ function renderDisassemblyPanel() {
 }
 
 // ── Panel Event Binders ──────────────────────────────────
-
-function _bindViewButtons() {
-  document.getElementById('btn-vfront')?.addEventListener('click', () => sm.viewFront());
-  document.getElementById('btn-vback')?.addEventListener('click', () => sm.viewBack());
-  document.getElementById('btn-vleft')?.addEventListener('click', () => sm.viewLeft());
-  document.getElementById('btn-vright')?.addEventListener('click', () => sm.viewRight());
-  document.getElementById('btn-vtop')?.addEventListener('click', () => sm.viewTop());
-  document.getElementById('btn-viso')?.addEventListener('click', () => sm.viewIsometric());
-}
 
 let _activeChainPayload = null;
 let _preDemoGroups = null;
@@ -331,15 +306,35 @@ function _startChainDemo(payload) {
   shared.fixedPartIds.clear();
   sharedExplo.setFixedPartIds(new Set());
 
+  // Build nodeId -> leaf partId lookup from hierarchy
+  const nodeToLeafIds = new Map();
+  function _walkHierarchy(node) {
+    nodeToLeafIds.set(node.id, node.partIds || []);
+    for (const c of node.children || []) _walkHierarchy(c);
+  }
+  for (const root of (shared.hierarchy || [])) _walkHierarchy(root);
+
   const chainPartIds = new Set();
   for (const stg of payload.chain || []) {
-    for (const p of stg.parts || []) chainPartIds.add(p);
+    for (const p of stg.parts || []) {
+      const resolved = nodeToLeafIds.get(p);
+      if (resolved && resolved.length > 1) {
+        for (const id of resolved) chainPartIds.add(id);
+      } else {
+        chainPartIds.add(p);
+      }
+    }
   }
 
   const stageByPart = {};
   for (let i = 0; i < (payload.chain || []).length; i++) {
     for (const p of payload.chain[i].parts || []) {
-      stageByPart[p] = i + 1;
+      const resolved = nodeToLeafIds.get(p);
+      if (resolved && resolved.length > 1) {
+        for (const id of resolved) stageByPart[id] = i + 1;
+      } else {
+        stageByPart[p] = i + 1;
+      }
     }
   }
 
@@ -466,7 +461,7 @@ function bindPositionPanel() {
   });
 
   document.getElementById('btn-annot-show')?.addEventListener('click', () => {
-    if (shared.assembly) annot.setParts(shared.assembly.parts, shared.checkedPartIds);
+    if (shared.assembly) annot.setParts(shared.assembly.parts, shared.checkedNodes);
     annot.setHiddenPartIds(shared.hiddenPartIds);
     annot.show();
     annot.draw();
@@ -474,10 +469,21 @@ function bindPositionPanel() {
 
   document.getElementById('btn-annot-hide')?.addEventListener('click', () => annot.clear());
   document.getElementById('btn-export')?.addEventListener('click', _exportAnnotated);
-  _bindViewButtons();
   _bindChainDemoButtons();
   buildActiveTree();
   _renderBomList();
+}
+
+function _updateCenterDisplay() {
+  const el = document.getElementById('center-display');
+  if (!el) return;
+  if (shared.explosionCenter) {
+    el.textContent = '当前中心: ' + shared.explosionCenter;
+    el.style.color = '#ffd24a';
+  } else {
+    el.textContent = '未设置 (使用几何重心)';
+    el.style.color = '#7ec8e3';
+  }
 }
 
 function bindExplosionPanel() {
@@ -487,6 +493,46 @@ function bindExplosionPanel() {
     await window.electronAPI.runBomFullPipeline(null);
   });
   document.getElementById('btn-load')?.addEventListener('click', loadAssembly);
+
+  document.getElementById('btn-set-center')?.addEventListener('click', () => {
+    const sel = shared.selectedNode
+             || (tabs[activeTab].tree ? tabs[activeTab].tree.getCheckedNodeId() : null);
+    if (!sel) {
+      _showModal('未选择节点',
+        '请先在<b>结构树</b>中点击或勾选一个零件 / 子装配节点，再点"选中爆炸中心"。');
+      return;
+    }
+    shared.explosionCenter = sel;
+    _updateCenterDisplay();
+    statusBar.textContent = '已设置爆炸中心: ' + sel;
+  });
+
+  document.getElementById('btn-clear-center')?.addEventListener('click', () => {
+    shared.explosionCenter = null;
+    _updateCenterDisplay();
+    statusBar.textContent = '已清除爆炸中心 (将使用几何重心)';
+  });
+
+  document.getElementById('btn-gen-explosion')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    if (!shared.sourceStpPath && !shared.bomSourcePath) {
+      _showModal('无可用数据',
+        '请先加载装配数据再生成爆炸视图:<br><br>' +
+        '<ul><li>方法1: <b>位置图 → 加载BOM</b> 加载多文件 BOM</li>' +
+        '<li>方法2: <b>Ctrl+I</b> 导入单文件 STP</li></ul>');
+      return;
+    }
+    const centerLabel = shared.explosionCenter ? ' (中心: ' + shared.explosionCenter + ')' : ' (几何重心)';
+    statusBar.textContent = '生成爆炸视图' + centerLabel + '...';
+    if (shared.bomSourcePath) {
+      await window.electronAPI.runBomExplosionPipelineCached(
+        shared.bomSourcePath, shared.bomModelsDir, shared.explosionCenter);
+    } else {
+      await window.electronAPI.runExplosionPipelineWithCenter(
+        shared.sourceStpPath, shared.explosionCenter);
+    }
+  });
+
   const slider = document.getElementById('slider-dist');
   const val = document.getElementById('val-dist');
   slider?.addEventListener('input', () => {
@@ -500,7 +546,7 @@ function bindExplosionPanel() {
   document.getElementById('btn-manual-on')?.addEventListener('click', () => sharedExplo.enableManualMode());
   document.getElementById('btn-manual-off')?.addEventListener('click', () => sharedExplo.disableManualMode());
   document.getElementById('btn-annot-show')?.addEventListener('click', () => {
-    if (shared.assembly) annot.setParts(shared.assembly.parts, shared.checkedPartIds);
+    if (shared.assembly) annot.setParts(shared.assembly.parts, shared.checkedNodes);
     annot.setHiddenPartIds(shared.hiddenPartIds);
     annot.show();
     annot.draw();
@@ -508,10 +554,9 @@ function bindExplosionPanel() {
   document.getElementById('btn-annot-hide')?.addEventListener('click', () => annot.clear());
   document.getElementById('btn-thrust')?.addEventListener('click', () => sharedExplo.toggleThrustLines());
   document.getElementById('btn-export')?.addEventListener('click', _exportAnnotated);
-  _bindViewButtons();
   _bindChainDemoButtons();
-  _bindDisassemblyButtons();
   buildActiveTree();
+  _updateCenterDisplay();
 }
 
 function bindDisassemblyPanel() {
@@ -547,8 +592,6 @@ function bindDisassemblyPanel() {
         shared.sourceStpPath, targetPart);
     }
   });
-  document.getElementById('btn-explode')?.addEventListener('click', () => sharedExplo.explodeGroupsAnimated(800));
-  document.getElementById('btn-reset')?.addEventListener('click', () => sharedExplo.resetPositions());
   document.getElementById('btn-export')?.addEventListener('click', _exportSimple);
   document.getElementById('btn-pipeline-node')?.addEventListener('click', async () => {
     if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
@@ -718,6 +761,9 @@ function buildActiveTree() {
     },
     onCheckChange: (nodeId, partIds) => {
       shared.checkedPartIds = new Set(partIds);
+      if (t.tree && typeof t.tree.getCheckedNodes === 'function') {
+        shared.checkedNodes = t.tree.getCheckedNodes();
+      }
       _rebuildExplosionGroups();
       if (nodeId) {
         _highlightParts([...partIds]);
@@ -811,6 +857,7 @@ async function _loadModelCore(assembly, dir) {
   // Reset all shared state to avoid stale references
   shared.hiddenPartIds = new Set();
   shared.checkedPartIds = new Set();
+  shared.checkedNodes = [];
   shared.fixedPartIds = new Set();
   shared.selectedNode = null;
   shared.bomEntries = [];
@@ -855,16 +902,21 @@ async function _loadModelCore(assembly, dir) {
   for (const [, p] of shared.loaded) {
     for (const m of p.meshes) {
       m.userData.partId = p.id;
+      if (p.isExplosionCenter) m.userData.isExplosionCenter = true;
       shared.meshes.push(m);
       meshCount++;
       if (!m.material) {
-        m.material = new THREE.MeshStandardMaterial({ color: p.color || 0x0080c0, roughness: 0.5, metalness: 0.0 });
+        m.material = new THREE.MeshStandardMaterial({ color: p.color || 0x0080c0, roughness: 0.5, metalness: 0.0, side: THREE.DoubleSide });
       } else if (Array.isArray(m.material)) {
         for (const mat of m.material) {
+          mat.side = THREE.DoubleSide;
           if (mat.color && mat.color.getHex() === 0xffffff && !p.color) mat.color.set(0x0080c0);
         }
-      } else if (m.material.color && m.material.color.getHex() === 0xffffff && !p.color) {
-        m.material.color.set(0x0080c0);
+      } else {
+        m.material.side = THREE.DoubleSide;
+        if (m.material.color && m.material.color.getHex() === 0xffffff && !p.color) {
+          m.material.color.set(0x0080c0);
+        }
       }
     }
     if (p.modelData && p.modelData.scene) {
@@ -1140,6 +1192,12 @@ if (window.electronAPI) {
   window.electronAPI.onMenuLoadAssembly(async () => { await loadAssembly(); });
   window.electronAPI.onMenuResetCamera(() => sm.resetCamera());
   window.electronAPI.onMenuScreenshot(() => _exportAnnotated());
+  window.electronAPI.onMenuViewLeftRear(() => sm.viewLeftRear());
+  window.electronAPI.onMenuViewLeftFront(() => sm.viewLeftFront());
+  window.electronAPI.onMenuViewRightRear(() => sm.viewRightRear());
+  window.electronAPI.onMenuViewRightFront(() => sm.viewRightFront());
+  window.electronAPI.onMenuViewTop(() => sm.viewTop());
+  window.electronAPI.onMenuViewBottom(() => sm.viewBottom());
 }
 
 // ── Startup ──────────────────────────────────────────────
@@ -1160,4 +1218,4 @@ window.addEventListener('error', (e) => {
 });
 
 sm.renderer.domElement.style.display = 'block';
-statusBar.textContent = '就绪 — Ctrl+B 加载BOM | Ctrl+O 加载JSON';
+statusBar.textContent = '就绪 — Ctrl+O 加载STEP | Ctrl+B 加载BOM | 视图菜单切换视角';

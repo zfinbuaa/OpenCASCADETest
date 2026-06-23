@@ -5,6 +5,9 @@ OCC packaging is handled entirely by hooks/hook-OCC.py
 DLL search path setup is handled by hooks/rthook-occ.py
 """
 
+import pathlib
+_HERE = pathlib.Path(SPECPATH).resolve()
+
 import PyInstaller.building.build_main as _bm
 _bm.discover_hook_directories = lambda: []
 
@@ -75,6 +78,8 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+_version_file = str(_HERE / 'version_info.txt')
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -88,9 +93,11 @@ exe = EXE(
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch=None,
+    target_arch='x86_64',
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(_HERE / 'app_icon.ico') if (_HERE / 'app_icon.ico').exists() else None,
+    version=_version_file if pathlib.Path(_version_file).exists() else None,
 )
 
 coll = COLLECT(

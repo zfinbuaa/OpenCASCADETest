@@ -25,6 +25,8 @@ export class ExplosionView {
     this._fixedPartIds = new Set();
     this._ghostMeshes = new Map();
     this._matSnapshot = new Map();
+    this._centerMeshes = new Set();
+    this._centerEmissive = new Map();
 
     this._thrustLines = [];
     this._thrustVisible = false;
@@ -87,6 +89,45 @@ export class ExplosionView {
 
   _isFixedMesh(mesh) {
     return this._fixedPartIds.has(mesh.userData.partId);
+  }
+
+  _isExplosionCenter(mesh) {
+    return !!(mesh && mesh.userData && mesh.userData.isExplosionCenter);
+  }
+
+  _setMeshCenter(mesh) {
+    if (!mesh || !mesh.material) return;
+    if (this._centerMeshes.has(mesh)) return;
+    this._centerMeshes.add(mesh);
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const mat of mats) {
+      if (mat.emissive) {
+        this._centerEmissive.set(mat, {
+          color: mat.emissive.clone(),
+          intensity: mat.emissiveIntensity !== undefined ? mat.emissiveIntensity : 0,
+        });
+        mat.emissive.setHex(0xffaa00);
+        mat.emissiveIntensity = 0.4;
+        mat.needsUpdate = true;
+      }
+    }
+  }
+
+  _clearCenterMeshes() {
+    for (const mesh of this._centerMeshes) {
+      if (!mesh.material) continue;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const mat of mats) {
+        const saved = this._centerEmissive.get(mat);
+        if (saved && mat.emissive) {
+          mat.emissive.copy(saved.color);
+          mat.emissiveIntensity = saved.intensity;
+          mat.needsUpdate = true;
+        }
+      }
+    }
+    this._centerMeshes.clear();
+    this._centerEmissive.clear();
   }
 
   _applyWorldOffset(mesh, worldOffset) {
@@ -169,6 +210,8 @@ export class ExplosionView {
         this.originalLocalPositions.set(mesh, mesh.position.clone());
         if (this._isFixedMesh(mesh)) {
           this._setMeshGhost(mesh, true);
+        } else if (this._isExplosionCenter(mesh)) {
+          this._setMeshCenter(mesh);
         }
       }
     }
@@ -179,6 +222,7 @@ export class ExplosionView {
     this._disableTransformCtrl();
     this.clearThrustLines();
     this._clearPathLines();
+    this._clearCenterMeshes();
     this.assemblyGroups = [];
     this.meshToGroup.clear();
     this.originalPositions.clear();
@@ -232,6 +276,7 @@ export class ExplosionView {
         const dist = this.explosionDistance * (group.distanceMultiplier || 1);
         for (const mesh of group.meshes) {
           if (this._isFixedMesh(mesh)) continue;
+          if (this._isExplosionCenter(mesh)) continue;
           if (!mesh.visible) continue;
           const sp = this.explodedPositions.get(mesh);
           if (!sp) continue;
@@ -256,6 +301,7 @@ export class ExplosionView {
       const worldOffset = dir.clone().multiplyScalar(dist);
       for (const mesh of g.meshes) {
         if (this._isFixedMesh(mesh)) continue;
+        if (this._isExplosionCenter(mesh)) continue;
         if (!mesh.visible) continue;
         const origin = this.originalPositions.get(mesh).clone();
         const target = origin.clone().add(worldOffset);
@@ -270,6 +316,7 @@ export class ExplosionView {
   resetPositions() {
     for (const [mesh, pos] of this.originalPositions) {
       if (this._isFixedMesh(mesh)) continue;
+      if (this._isExplosionCenter(mesh)) continue;
       mesh.position.copy(this.originalLocalPositions.get(mesh) || pos);
       this.explodedPositions.set(mesh, pos.clone());
     }
@@ -384,6 +431,7 @@ export class ExplosionView {
     for (const [mesh, orig] of this.originalPositions) {
       if (!this.isExploded) break;
       if (this._isFixedMesh(mesh)) continue;
+      if (this._isExplosionCenter(mesh)) continue;
       const exploded = this.explodedPositions.get(mesh);
       if (!exploded || exploded.equals(orig)) continue;
 
@@ -467,6 +515,7 @@ export class ExplosionView {
   _showRemovalPath(meshes, dirVector, distance) {
     for (const mesh of meshes) {
       if (this._isFixedMesh(mesh)) continue;
+      if (this._isExplosionCenter(mesh)) continue;
       const origin = this.originalPositions.get(mesh);
       if (!origin) continue;
       const target = origin.clone().add(dirVector.clone().multiplyScalar(distance));
@@ -486,6 +535,7 @@ export class ExplosionView {
     const targets = new Map();
     for (const mesh of meshes) {
       if (this._isFixedMesh(mesh)) continue;
+      if (this._isExplosionCenter(mesh)) continue;
       const origin = this.explodedPositions.get(mesh);
       if (!origin) continue;
       const target = origin.clone().add(dirVector.clone().multiplyScalar(distance));
@@ -502,6 +552,7 @@ export class ExplosionView {
 
     for (const mesh of meshes) {
       if (this._isFixedMesh(mesh)) continue;
+      if (this._isExplosionCenter(mesh)) continue;
       if (!mesh.material) continue;
       // Save material state before mutating
       this._saveMaterialState(mesh);
@@ -536,6 +587,7 @@ export class ExplosionView {
   _removeMeshesFromScene(meshes, preFadeOpacities) {
     for (const mesh of meshes) {
       if (this._isFixedMesh(mesh)) continue;
+      if (this._isExplosionCenter(mesh)) continue;
       if (this._removedMeshes.has(mesh)) continue;
       const parent = mesh.parent;
       if (!parent) continue;
@@ -585,7 +637,8 @@ export class ExplosionView {
         for (const group of groups) {
           const dir = this._directionToVector(group.direction);
           const dist = this.explosionDistance * (group.distanceMultiplier || 1);
-          const meshesToRemove = group.meshes.filter(m => !this._isFixedMesh(m));
+          const meshesToRemove = group.meshes.filter(m =>
+            !this._isFixedMesh(m) && !this._isExplosionCenter(m));
           if (meshesToRemove.length === 0) continue;
 
           const preFadeOpacities = new Map();
@@ -628,7 +681,8 @@ export class ExplosionView {
       if (this._disassembleStage > 0 && stage < this._disassembleStage) continue;
       const groups = stageMap.get(stage);
       for (const group of groups) {
-        const meshesToRemove = group.meshes.filter(m => !this._isFixedMesh(m));
+        const meshesToRemove = group.meshes.filter(m =>
+          !this._isFixedMesh(m) && !this._isExplosionCenter(m));
         if (meshesToRemove.length === 0) continue;
         if (!this._removedMeshes.has(meshesToRemove[0])) {
           const dir = this._directionToVector(group.direction);
@@ -694,6 +748,7 @@ export class ExplosionView {
     this.clearThrustLines();
     for (const [mesh, pos] of this.originalPositions) {
       if (this._isFixedMesh(mesh)) continue;
+      if (this._isExplosionCenter(mesh)) continue;
       const origLocal = this.originalLocalPositions.get(mesh);
       if (origLocal) mesh.position.copy(origLocal);
       this.explodedPositions.set(mesh, pos.clone());

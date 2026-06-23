@@ -86,6 +86,7 @@ export class BodyLoader {
           mat.transparent = true;
           mat.opacity = 0.7;
           mat.depthWrite = false;
+          mat.side = 2; // DoubleSide
           mat.needsUpdate = true;
         }
       }

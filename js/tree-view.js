@@ -62,13 +62,18 @@ export class TreeView {
 
   _buildNodeIndex() {
     this._nodeIdToPartIds = new Map();
-    const visit = (node) => {
+    let _counter = 0;
+    const visit = (node, parentPath) => {
+      node._path = (parentPath || '') + '/' + node.id + '##' + (_counter++);
       const ids = new Set();
       this._collectPartIds(node, ids);
-      this._nodeIdToPartIds.set(node.id, ids);
-      for (const c of node.children || []) visit(c);
+      if (ids.size === 0 && this.partsMap && this.partsMap[node.id]) {
+        ids.add(node.id);
+      }
+      this._nodeIdToPartIds.set(node._path, ids);
+      for (const c of node.children || []) visit(c, node._path);
     };
-    for (const r of this.hierarchy) visit(r);
+    for (const r of this.hierarchy) visit(r, '');
   }
 
   _renderNode(node, parentEl, depth) {
@@ -79,12 +84,14 @@ export class TreeView {
     const part = this.partsMap[lookupId] || this.partsMap[node.id];
     const stage = part ? (part.disassemblyStage || this.stagesMap[node.id]) : this.stagesMap[node.id];
     const isFastener = part ? part.isFastener : false;
-    const nodePartIds = node.partIds || [];
+    const nodePartIds = (node.partIds || []);
+    const validPartIds = nodePartIds.filter(pid => this.partsMap[pid] !== undefined);
 
     const row = document.createElement('div');
     row.className = 'tree-node';
     row.style.paddingLeft = (12 + depth * 16) + 'px';
     row.dataset.nodeId = node.id;
+    row.dataset.nodePath = node._path;
 
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
@@ -99,7 +106,7 @@ export class TreeView {
     const arrow = document.createElement('span');
     arrow.className = 'arrow' + (hasChildren ? '' : ' leaf');
     if (hasChildren) {
-      arrow.textContent = this._collapsed.has(node.id) ? '▶' : '▼';
+      arrow.textContent = this._collapsed.has(node._path) ? '▶' : '▼';
     }
     row.appendChild(arrow);
 
@@ -120,7 +127,7 @@ export class TreeView {
     });
     row.appendChild(eye);
 
-    const count = nodePartIds.length;
+    const count = validPartIds.length;
     if (!isLeaf && count > 0) {
       const countBadge = document.createElement('span');
       countBadge.className = 'badge';
@@ -149,15 +156,15 @@ export class TreeView {
       row.appendChild(fxb);
     }
 
-    if (node.partIds && node.partIds.length > 0) {
+    if (validPartIds.length > 0) {
       const swatch = document.createElement('span');
       swatch.className = 'swatch';
-      const storedColor = this._colorMap[lookupId] || this._colorMap[node.partIds[0]];
+      const storedColor = this._colorMap[lookupId] || this._colorMap[validPartIds[0]];
       const color = storedColor || (part && part.color
         ? '#' + ((1 << 24) + (Math.round(part.color[0]*255) << 16) + (Math.round(part.color[1]*255) << 8) + Math.round(part.color[2]*255)).toString(16).slice(1)
         : '#0080c0');
       swatch.style.backgroundColor = color;
-      swatch.title = '点击修改颜色' + (node.partIds.length > 1 && !isLeaf ? ' (含' + node.partIds.length + '子件)' : '');
+      swatch.title = '点击修改颜色' + (validPartIds.length > 1 && !isLeaf ? ' (含' + validPartIds.length + '子件)' : '');
       swatch.addEventListener('click', (e) => {
         e.stopPropagation();
         this._showColorPicker(swatch, node);
@@ -169,7 +176,7 @@ export class TreeView {
 
     row.addEventListener('click', (e) => {
       if (e.target.classList.contains('arrow') && hasChildren) {
-        this._toggleCollapse(node.id, childrenEl, arrow);
+        this._toggleCollapse(node._path, childrenEl, arrow);
         return;
       }
       if (e.target.tagName === 'INPUT') return;
@@ -179,7 +186,7 @@ export class TreeView {
 
     parentEl.appendChild(row);
 
-    childrenEl.className = 'tree-children' + (this._collapsed.has(node.id) ? ' collapsed' : '');
+    childrenEl.className = 'tree-children' + (this._collapsed.has(node._path) ? ' collapsed' : '');
     if (hasChildren) {
       for (const child of node.children) {
         this._renderNode(child, childrenEl, depth + 1);
@@ -189,7 +196,7 @@ export class TreeView {
   }
 
   _toggleCheck(node) {
-    const nodePartIds = this._nodeIdToPartIds.get(node.id)
+    const nodePartIds = this._nodeIdToPartIds.get(node._path)
       || (() => { const s = new Set(); this._collectPartIds(node, s); return s; })();
 
     // Tri-state semantics: if all children currently checked, uncheck them all;
@@ -229,8 +236,8 @@ export class TreeView {
     const checkboxes = this.container.querySelectorAll('.tree-check');
     for (const cb of checkboxes) {
       const row = cb.parentNode;
-      const nodeId = row.dataset.nodeId;
-      const nodePartIds = this._nodeIdToPartIds.get(nodeId);
+      const nodePath = row.dataset.nodePath;
+      const nodePartIds = this._nodeIdToPartIds.get(nodePath);
       if (!nodePartIds || nodePartIds.size === 0) {
         cb.checked = false;
         cb.indeterminate = false;
@@ -263,6 +270,35 @@ export class TreeView {
     return this._lastCheckedNodeId;
   }
 
+  getCheckedNodes() {
+    const result = [];
+    const visited = new Set();
+    const visit = (node) => {
+      if (visited.has(node._path)) return;
+      const nodePartIds = this._nodeIdToPartIds.get(node._path);
+      if (!nodePartIds || nodePartIds.size === 0) {
+        for (const c of node.children || []) visit(c);
+        return;
+      }
+      let allChecked = true;
+      for (const pid of nodePartIds) {
+        if (!this._checkedPartIds.has(pid)) { allChecked = false; break; }
+      }
+      if (allChecked) {
+        result.push({ nodeId: node.id, partIds: new Set(nodePartIds) });
+        const markVisited = (n) => {
+          visited.add(n._path);
+          for (const c of n.children || []) markVisited(c);
+        };
+        markVisited(node);
+      } else {
+        for (const c of node.children || []) visit(c);
+      }
+    };
+    for (const r of this.hierarchy) visit(r);
+    return result;
+  }
+
   clearChecked() {
     this._checkedPartIds = new Set();
     this._lastCheckedNodeId = null;
@@ -280,13 +316,13 @@ export class TreeView {
     return false;
   }
 
-  _toggleCollapse(nodeId, childrenEl, arrow) {
-    if (this._collapsed.has(nodeId)) {
-      this._collapsed.delete(nodeId);
+  _toggleCollapse(nodePath, childrenEl, arrow) {
+    if (this._collapsed.has(nodePath)) {
+      this._collapsed.delete(nodePath);
       childrenEl.classList.remove('collapsed');
       arrow.textContent = '▼';
     } else {
-      this._collapsed.add(nodeId);
+      this._collapsed.add(nodePath);
       childrenEl.classList.add('collapsed');
       arrow.textContent = '▶';
     }
@@ -315,19 +351,20 @@ export class TreeView {
     if (!result) return false;
     const { node, ancestors } = result;
 
-    for (const ancId of ancestors) {
-      const ancRow = this.container.querySelector('[data-node-id="' + ancId + '"]');
+    for (const ancPath of ancestors) {
+      const ancRow = this.container.querySelector('[data-node-path="' + ancPath + '"]');
       if (!ancRow) continue;
       const arrow = ancRow.querySelector('.arrow');
       const childrenDiv = ancRow.nextElementSibling;
       if (childrenDiv && childrenDiv.classList.contains('tree-children')) {
         childrenDiv.classList.remove('collapsed');
+        const ancId = ancRow.dataset.nodeId;
         this._collapsed.delete(ancId);
         if (arrow) arrow.textContent = '▼';
       }
     }
 
-    const row = this.container.querySelector('[data-node-id="' + node.id + '"]');
+    const row = this.container.querySelector('[data-node-path="' + node._path + '"]');
     if (!row) return false;
     this._select(row, node);
     row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -337,7 +374,7 @@ export class TreeView {
   _findNodeByPartId(nodes, partId, ancestors) {
     for (const node of nodes) {
       if (node.children && node.children.length > 0) {
-        ancestors.push(node.id);
+        ancestors.push(node._path);
         const result = this._findNodeByPartId(node.children, partId, ancestors);
         if (result) return result;
         ancestors.pop();

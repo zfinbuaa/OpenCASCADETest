@@ -7,6 +7,7 @@ preview_output/
 build/
 dist/
 release/
+version_info.txt
 .DS_Store
 Thumbs.db
 *.log

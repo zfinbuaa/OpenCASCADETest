@@ -77,6 +77,9 @@ def main():
                         help="仅计算指定零件的拆卸依赖链（依赖链模式）")
     parser.add_argument("--no-optimize-dir", action="store_true",
                         help="依赖链模式下关闭方向最优化（使用旧的单方向递归算法）")
+    parser.add_argument("--center-part", default=None,
+                        help="爆炸视图模式 (--skip-collision)：指定中心固定零件名 "
+                             "(leaf 或 sub-assembly 节点)。未指定则使用几何重心。")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -224,23 +227,47 @@ def main():
         }
         log("CHAIN_RESULT_JSON: " + json.dumps(chain_result, ensure_ascii=False))
     else:
-        log("[7/8] Building collision-driven disassembly plan...")
-        t0 = time.time()
-        stages, verified_dirs, dist_mults, details = build_disassembly_dag_v2(
-            parts, directions, collision_data, fasteners,
-            max_distance=args.explosion_distance,
-            assembly_centroid=assembly_centroid,
-            sub_assemblies=sub_assemblies)
+        if args.skip_collision:
+            from pipeline.explosion_planner import build_explosion_plan
+            log("[7/8] Building explosion view (geometry-based, no swept collision)...")
+            t0 = time.time()
+            stages, verified_dirs, dist_mults, details = build_explosion_plan(
+                parts, directions, collision_data,
+                sub_assemblies=sub_assemblies,
+                center_part=args.center_part,
+                max_distance=args.explosion_distance,
+                base_explosion_distance=150.0)
+            feasible = sum(1 for d in details if d.get("feasible"))
+            blocked = len(details) - feasible
+            log("  Explosion plan: {} stages, {}/{} parts placed ({:.1f}s)".format(
+                len(stages), feasible, len(details), time.time() - t0))
+        else:
+            label = "Building collision-driven disassembly plan"
+            log("[7/8] {}...".format(label))
+            t0 = time.time()
+            stages, verified_dirs, dist_mults, details = build_disassembly_dag_v2(
+                parts, directions, collision_data, fasteners,
+                max_distance=args.explosion_distance,
+                assembly_centroid=assembly_centroid,
+                sub_assemblies=sub_assemblies,
+                correct_directions=True)
 
-        feasible = sum(1 for d in details if d.get("feasible"))
-        blocked = len(details) - feasible
-        log("  {} stages, {}/{} parts feasible ({:.1f}s)".format(
-            len(stages), feasible, len(details), time.time() - t0))
+            feasible = sum(1 for d in details if d.get("feasible"))
+            blocked = len(details) - feasible
+            log("  {} stages, {}/{} parts feasible ({:.1f}s)".format(
+                len(stages), feasible, len(details), time.time() - t0))
 
     for part in parts:
         name = part["name"]
         if name in verified_dirs:
             part["direction"] = verified_dirs[name]
+
+    # Propagate isExplosionCenter from details to parts (for assembly.json)
+    center_names = {d["part"] for d in details if d.get("isExplosionCenter")}
+    if center_names:
+        for part in parts:
+            if part["name"] in center_names:
+                part["isExplosionCenter"] = True
 
     feasible = sum(1 for d in details if d.get("feasible"))
     blocked = len(details) - feasible
@@ -369,12 +396,6 @@ def _run_validate(args):
     roots = extract_assembly_tree(doc)
     parts, _sub_assemblies = flatten_assembly_tree(roots)
     log("  {} parts extracted".format(len(parts)))
-
-    # Also try looking for sourceFile adjacent to the JSON
-    if not source_file or not os.path.exists(source_file):
-        adj = os.path.join(os.path.dirname(json_path), os.path.basename(source_file))
-        if os.path.exists(adj):
-            source_file = adj
 
     # Map assembly.json stage data to loaded parts
     stage_map = {}
@@ -555,8 +576,6 @@ def _run_bom_preview(args):
         for p in sub_parts:
             if "bomSource" not in p:
                 p["bomSource"] = bom_info
-            if not p["name"].startswith(code + "_"):
-                p["name"] = "{}_{:04d}__{}".format(code, i, p["name"].split("__", 1)[-1] if "__" in p["name"] else p["name"])
 
         _prefix_hierarchy_roots(roots, "{}_{:04d}__".format(code, i))
 
@@ -653,7 +672,7 @@ def _run_bom_full(args):
                 log("    loading ALL {} parts from STP".format(len(all_sub_parts)))
                 sub_parts = all_sub_parts
         else:
-                sub_parts = all_sub_parts
+            sub_parts = all_sub_parts
 
         for p in sub_parts:
             p["name"] = "{}_{:04d}__{}".format(code, i, p["name"])
@@ -668,8 +687,6 @@ def _run_bom_full(args):
         for p in sub_parts:
             if "bomSource" not in p:
                 p["bomSource"] = bom_info
-            if not p["name"].startswith(code + "_"):
-                p["name"] = "{}_{:04d}__{}".format(code, i, p["name"].split("__", 1)[-1] if "__" in p["name"] else p["name"])
 
         _prefix_hierarchy_roots(roots, "{}_{:04d}__".format(code, i))
 
@@ -801,18 +818,45 @@ def _run_bom_full(args):
         }
         log("CHAIN_RESULT_JSON: " + json.dumps(chain_result, ensure_ascii=False))
     else:
-        log("[6/7] Building collision-driven disassembly plan (BOM-level)...")
-        t0 = time.time()
-        stages, verified_dirs, dist_mults, details = build_disassembly_dag_v2(
-            dag_parts, directions, dag_collision_data, fasteners,
-            max_distance=args.explosion_distance,
-            assembly_centroid=assembly_centroid,
-            sub_assemblies=sub_assemblies)
+        if args.skip_collision:
+            from pipeline.explosion_planner import build_explosion_plan
+            log("[6/7] Building BOM-level explosion view (geometry-based)...")
+            t0 = time.time()
+            # Resolve center: user may pass leaf or BOM-unit name
+            bom_center = None
+            if args.center_part:
+                if args.center_part in {p["name"] for p in dag_parts}:
+                    bom_center = args.center_part
+                else:
+                    for key, children in bom_group_map.items():
+                        if args.center_part in children or args.center_part == key:
+                            bom_center = key
+                            break
+                    if not bom_center:
+                        bom_center = args.center_part
+            stages, verified_dirs, dist_mults, details = build_explosion_plan(
+                dag_parts, directions, dag_collision_data,
+                sub_assemblies=sub_assemblies,
+                center_part=bom_center,
+                max_distance=args.explosion_distance,
+                base_explosion_distance=150.0)
+            feasible = sum(1 for d in details if d.get("feasible"))
+            blocked = len(details) - feasible
+            log("  Explosion plan: {} stages, {}/{} BOM-units placed ({:.1f}s)".format(
+                len(stages), feasible, len(details), time.time() - t0))
+        else:
+            log("[6/7] Building collision-driven disassembly plan (BOM-level)...")
+            t0 = time.time()
+            stages, verified_dirs, dist_mults, details = build_disassembly_dag_v2(
+                dag_parts, directions, dag_collision_data, fasteners,
+                max_distance=args.explosion_distance,
+                assembly_centroid=assembly_centroid,
+                sub_assemblies=sub_assemblies)
 
-        feasible = sum(1 for d in details if d.get("feasible"))
-        blocked = len(details) - feasible
-        log("  {} BOM-unit stages, {}/{} units feasible ({:.1f}s)".format(
-            len(stages), feasible, len(details), time.time() - t0))
+            feasible = sum(1 for d in details if d.get("feasible"))
+            blocked = len(details) - feasible
+            log("  {} BOM-unit stages, {}/{} units feasible ({:.1f}s)".format(
+                len(stages), feasible, len(details), time.time() - t0))
 
     # ── Map dag-part stages/directions back to individual leaf parts ──
     dag_stage = {}
@@ -833,10 +877,18 @@ def _run_bom_full(args):
             for name in child_names:
                 leaf_verified_dirs[name] = verified_dirs[key]
 
+    # Propagate isExplosionCenter from BOM-unit details to leaf parts
+    center_unit_names = {d["part"] for d in details if d.get("isExplosionCenter")}
+    leaf_center_names = set()
+    for key in center_unit_names:
+        leaf_center_names.update(bom_group_map.get(key, []))
+
     for part in flat_parts:
         name = part["name"]
         if name in leaf_verified_dirs:
             part["direction"] = leaf_verified_dirs[name]
+        if name in leaf_center_names:
+            part["isExplosionCenter"] = True
 
     # Write report
     report_lines = []

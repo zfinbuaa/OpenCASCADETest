@@ -254,10 +254,13 @@ def _infer_constrained_direction(part_name, parts, contacts):
             avg_axis = np.zeros(3)
             for ax in cyl_axes:
                 avg_axis += ax
-            avg_axis /= np.linalg.norm(avg_axis)
-            if np.dot(avg_contact_normal, avg_axis) > 0:
-                avg_axis = -avg_axis
-            return _project_to_candidates(avg_axis)
+            axis_norm = np.linalg.norm(avg_axis)
+            if axis_norm > 1e-10:
+                avg_axis /= axis_norm
+                if np.dot(avg_contact_normal, avg_axis) > 0:
+                    avg_axis = -avg_axis
+                return _project_to_candidates(avg_axis)
+            # Symmetric/opposing axes cancel out → fall through to contact normal
 
     return _project_to_candidates(avg_contact_normal)
 
@@ -313,9 +316,11 @@ def calc_disassembly_direction(part_name, parts, centroids=None,
     Algorithm:
     1. Try constraint inference from contact face types
        (planar contact → face normal, cylindrical → axis direction)
-    2. Fallback: centroid-outward with sibling repulsion
-    3. Project onto 26 candidate directions
-    4. Ultimate fallback: bbox longest axis, then +Y
+    2. Fallback: hierarchy-aware direction (parent centroid → part centroid)
+       with sibling repulsion
+    3. Further fallback: centroid-outward with sibling repulsion
+    4. Project onto 26 candidate directions
+    5. Ultimate fallback: bbox longest axis, then +Y
 
     Args:
         part_name: name of the part.
@@ -342,78 +347,55 @@ def calc_disassembly_direction(part_name, parts, centroids=None,
     if part_c is None:
         return [0.0, 1.0, 0.0]
 
-    outward = part_c - assembly_centroid
-    outward_norm = np.linalg.norm(outward)
-
-    if outward_norm < 1e-10:
-        bbox_dir = _bbox_longest_axis_direction(part_name, parts)
-        if bbox_dir is not None:
-            return _project_to_candidates(bbox_dir)
-        return [0.0, 1.0, 0.0]
-
-    outward_hat = outward / outward_norm
-
-    sibling_rep = _compute_sibling_repulsion(part_name, parts, centroids)
-    if sibling_rep is not None:
-        combined = 0.7 * outward_hat + 0.3 * sibling_rep
-        combined_norm = np.linalg.norm(combined)
-        if combined_norm > 1e-10:
-            outward_hat = combined / combined_norm
-
-    return _project_to_candidates(outward_hat)
-
-
-def _default_direction(part_name, parts, centroids, sub_assemblies=None):
-    """Default direction for a part with no contacts (free part).
-
-    If the part has a parent sub-assembly, direction is along the line
-    from the parent's centroid to the part's centroid. Otherwise +Y.
-    """
-    part_c = centroids.get(part_name)
-    if part_c is None:
-        return [0.0, 1.0, 0.0]
-
     parent_name = None
     for p in parts:
         if p["name"] == part_name:
             parent_name = p.get("parent")
             break
 
-    if parent_name and sub_assemblies:
-        for sa in sub_assemblies:
-            if sa["name"] == parent_name:
-                sa_centroid = sa.get("centroid")
-                if sa_centroid is not None:
-                    sa_c = np.array(sa_centroid)
-                else:
-                    sibling_centroids = []
-                    for p in parts:
-                        if p.get("parent") == parent_name and p["name"] != part_name:
-                            c = centroids.get(p["name"])
-                            if c is not None:
-                                sibling_centroids.append(c)
-                    if sibling_centroids:
-                        sa_c = np.mean(sibling_centroids, axis=0)
-                    else:
-                        sa_c = None
-                if sa_c is not None:
-                    direction = part_c - sa_c
-                    norm = np.linalg.norm(direction)
-                    if norm > 1e-10:
-                        return _project_to_candidates(direction / norm)
-                break
+    direction = None
 
-    return [0.0, 1.0, 0.0]
+    if parent_name and sub_assemblies:
+        sub_sa_centroids = _compute_sub_assembly_centroids(sub_assemblies, centroids)
+        parent_c = sub_sa_centroids.get(parent_name)
+        if parent_c is not None:
+            diff = part_c - parent_c
+            norm = np.linalg.norm(diff)
+            if norm > 1e-10:
+                direction = diff / norm
+
+    if direction is None:
+        outward = part_c - assembly_centroid
+        outward_norm = np.linalg.norm(outward)
+
+        if outward_norm < 1e-10:
+            bbox_dir = _bbox_longest_axis_direction(part_name, parts)
+            if bbox_dir is not None:
+                return _project_to_candidates(bbox_dir)
+            return [0.0, 1.0, 0.0]
+
+        direction = outward / outward_norm
+
+    sibling_rep = _compute_sibling_repulsion(part_name, parts, centroids)
+    if sibling_rep is not None:
+        combined = 0.6 * direction + 0.4 * sibling_rep
+        combined_norm = np.linalg.norm(combined)
+        if combined_norm > 1e-10:
+            direction = combined / combined_norm
+
+    return _project_to_candidates(direction)
 
 
 def compute_all_directions(parts, contacts=None, sub_assemblies=None):
     """
     Compute disassembly directions for all parts using constraint-inference
-    first, then centroid-outward as fallback.
+    first, then hierarchy-aware centroid-outward as fallback.
 
     For parts with contacts, analyses face types to infer natural
     disassembly direction (planar → face normal, cylindrical → axis).
-    Parts without contacts use a simple parent-centroid direction.
+    Parts without contacts use a hierarchy-aware direction:
+      1. Direction from parent sub-assembly centroid to part centroid
+      2. Fallback: centroid-outward with sibling repulsion
 
     Args:
         parts: list of part dicts with 'name', 'shape', 'parent'.
@@ -426,6 +408,8 @@ def compute_all_directions(parts, contacts=None, sub_assemblies=None):
     centroids = _compute_centroids(parts)
     assembly_centroid = _compute_assembly_centroid(parts, centroids)
 
+    sub_sa_centroids = _compute_sub_assembly_centroids(sub_assemblies, centroids)
+
     contact_parts = set()
     if contacts:
         for c in contacts:
@@ -436,11 +420,108 @@ def compute_all_directions(parts, contacts=None, sub_assemblies=None):
     for part in parts:
         name = part["name"]
         if contacts and name not in contact_parts:
-            directions[name] = _default_direction(
-                name, parts, centroids, sub_assemblies)
+            directions[name] = _hierarchy_aware_direction(
+                name, parts, centroids, sub_assemblies, sub_sa_centroids,
+                assembly_centroid)
         else:
             directions[name] = calc_disassembly_direction(
                 name, parts, centroids, assembly_centroid, sub_assemblies,
                 contacts=contacts)
 
     return directions
+
+
+def _compute_sub_assembly_centroids(sub_assemblies, part_centroids):
+    """
+    Compute effective centroids for all sub-assembly nodes.
+
+    For each sub-assembly, the centroid is either:
+      - Pre-computed from the OCCT shape (if available), or
+      - The mean of its descendant leaf part centroids.
+
+    Returns:
+        dict[str, ndarray(3)]: sub-assembly name -> centroid
+    """
+    if not sub_assemblies:
+        return {}
+
+    sa_centroids = {}
+    for sa in sub_assemblies:
+        if sa.get("centroid") is not None:
+            sa_centroids[sa["name"]] = np.array(sa["centroid"])
+        else:
+            child_centroids = []
+            for cn in sa.get("child_names", []):
+                c = part_centroids.get(cn)
+                if c is not None:
+                    child_centroids.append(c)
+            if child_centroids:
+                sa_centroids[sa["name"]] = np.mean(child_centroids, axis=0)
+
+    for sa in sub_assemblies:
+        if sa["name"] not in sa_centroids:
+            for cn in sa.get("child_names", []):
+                if cn in sa_centroids and cn not in part_centroids:
+                    sa_centroids[sa["name"]] = sa_centroids[cn]
+                    break
+
+    return sa_centroids
+
+
+def _hierarchy_aware_direction(part_name, parts, centroids, sub_assemblies,
+                                sub_sa_centroids, assembly_centroid):
+    """
+    Compute disassembly direction using hierarchy information.
+
+    Priority:
+      1. Direction from parent sub-assembly centroid to part centroid.
+         This respects the assembly structure: parts move away from
+         their parent assembly center.
+      2. If the part is itself the outermost in the tree, use the
+         direction from the overall assembly centroid.
+      3. Combine with sibling repulsion for better separation.
+      4. Project onto 26 candidate directions.
+
+    Returns:
+        list[float]: [x, y, z] unit direction vector.
+    """
+    part_c = centroids.get(part_name)
+    if part_c is None:
+        return [0.0, 1.0, 0.0]
+
+    parent_name = None
+    for p in parts:
+        if p["name"] == part_name:
+            parent_name = p.get("parent")
+            break
+
+    direction = None
+
+    if parent_name and sub_assemblies:
+        parent_c = sub_sa_centroids.get(parent_name)
+        if parent_c is not None:
+            diff = part_c - parent_c
+            norm = np.linalg.norm(diff)
+            if norm > 1e-10:
+                direction = diff / norm
+
+    if direction is None:
+        outward = part_c - assembly_centroid
+        norm = np.linalg.norm(outward)
+        if norm > 1e-10:
+            direction = outward / norm
+
+    if direction is None:
+        bbox_dir = _bbox_longest_axis_direction(part_name, parts)
+        if bbox_dir is not None:
+            return _project_to_candidates(bbox_dir)
+        return [0.0, 1.0, 0.0]
+
+    sibling_rep = _compute_sibling_repulsion(part_name, parts, centroids)
+    if sibling_rep is not None:
+        combined = 0.6 * direction + 0.4 * sibling_rep
+        combined_norm = np.linalg.norm(combined)
+        if combined_norm > 1e-10:
+            direction = combined / combined_norm
+
+    return _project_to_candidates(direction)

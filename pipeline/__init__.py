@@ -32,3 +32,6 @@ from .assembly_json import build_assembly_json, write_assembly_json
 from .collision_check import check_disassembly_path, check_obstacle_set, prepare_collision_data, find_best_feasible_direction
 from .path_searcher import find_feasible_direction, compute_all_feasible_directions
 from .path_validator import validate_disassembly_plan, generate_report
+
+# Phase 3: Explosion view (geometric-only, no swept collision)
+from .explosion_planner import build_explosion_plan

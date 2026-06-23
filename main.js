@@ -86,8 +86,17 @@ function buildMenu() {
       label: '文件',
       submenu: [
         {
-          label: '导入装配数据 (assembly.json)',
+          label: '加载单个 STEP 文件',
           accelerator: 'CmdOrCtrl+O',
+          click: () => runPreviewPipeline(),
+        },
+        {
+          label: '通过表格加载多个 STEP 文件',
+          accelerator: 'CmdOrCtrl+B',
+          click: () => runBomPreviewPipeline(),
+        },
+        {
+          label: '加载已处理的 JSON 文件',
           click: () => safeSend('menu-load-assembly'),
         },
         { type: 'separator' },
@@ -102,25 +111,14 @@ function buildMenu() {
       label: '管线',
       submenu: [
         {
-          label: '导入 BOM 预览 (多文件)',
-          accelerator: 'CmdOrCtrl+B',
-          click: () => runBomPreviewPipeline(),
-        },
-        {
-          label: '导入 STP 预览',
+          label: '生成爆炸路径',
           accelerator: 'CmdOrCtrl+I',
-          click: () => runPreviewPipeline(),
+          click: () => runExplosionPipeline(),
         },
         {
-          label: '生成拆卸方案',
+          label: '生成拆装方案',
           accelerator: 'CmdOrCtrl+G',
           click: () => runImportPipeline(),
-        },
-        { type: 'separator' },
-        {
-          label: '验证拆卸路径 (碰撞检测)',
-          accelerator: 'CmdOrCtrl+Shift+V',
-          click: () => runValidatePipeline(),
         },
       ],
     },
@@ -128,18 +126,35 @@ function buildMenu() {
       label: '视图',
       submenu: [
         {
-          label: '复位视角',
+          label: '复位视角 (右前方)',
           accelerator: 'F',
           click: () => safeSend('menu-reset-camera'),
         },
+        { type: 'separator' },
         {
-          label: '切换位置图模式',
-          click: () => safeSend('menu-toggle-ghost'),
+          label: '左后方',
+          click: () => safeSend('menu-view-left-rear'),
+        },
+        {
+          label: '左前方',
+          click: () => safeSend('menu-view-left-front'),
+        },
+        {
+          label: '右后方',
+          click: () => safeSend('menu-view-right-rear'),
+        },
+        {
+          label: '右前方',
+          click: () => safeSend('menu-view-right-front'),
         },
         { type: 'separator' },
         {
-          label: '显示/隐藏标注',
-          click: () => safeSend('menu-toggle-annotations'),
+          label: '俯视',
+          click: () => safeSend('menu-view-top'),
+        },
+        {
+          label: '仰视',
+          click: () => safeSend('menu-view-bottom'),
         },
       ],
     },
@@ -451,6 +466,104 @@ ipcMain.handle('run-pipeline-for-node', async (_event, rootNode) => {
   });
 });
 
+// ── Explosion Pipeline (geometric-only) with optional center part ─
+
+ipcMain.handle('run-explosion-pipeline-with-center', async (_event, stpPath, centerPart) => {
+  if (typeof stpPath !== 'string' || !fs.existsSync(stpPath)) {
+    safeSend('pipeline-progress', 'ERROR: STP file not found: ' + stpPath);
+    return;
+  }
+  const ext = path.extname(stpPath).toLowerCase();
+  if (ext !== '.stp' && ext !== '.step') {
+    safeSend('pipeline-progress', 'ERROR: invalid STP extension: ' + ext);
+    return;
+  }
+  if (centerPart != null && !validatePartName(centerPart)) {
+    safeSend('pipeline-progress', 'ERROR: invalid centerPart name');
+    return;
+  }
+
+  const outputDir = _tsOutputDir(stpPath);
+  registerAllowedRoot(outputDir);
+  registerAllowedRoot(path.dirname(stpPath));
+  const { exePath, baseArgs } = findPipelineExe();
+
+  const args = [
+    ...baseArgs,
+    stpPath,
+    '--output-dir', outputDir,
+    '--skip-collision',
+  ];
+  if (centerPart) {
+    args.push('--center-part', centerPart);
+  }
+
+  const centerLabel = centerPart ? ' (中心: ' + centerPart + ')' : ' (几何重心)';
+  safeSend('pipeline-progress', '=== 生成爆炸视图' + centerLabel + ' ===');
+  safeSend('pipeline-mode', 'full');
+  safeSend('pipeline-started', stpPath);
+
+  const env = buildPipelineEnv();
+  const proc = spawnPipeline(exePath, args, env);
+
+  proc.on('close', (code) => {
+    if (code === 0) {
+      const jsonPath = path.join(outputDir, 'assembly.json');
+      safeSend('pipeline-complete', jsonPath);
+    } else {
+      safeSend('pipeline-progress', '爆炸视图生成失败，退出码: ' + code);
+      safeSend('pipeline-error', code);
+    }
+  });
+});
+
+ipcMain.handle('run-bom-explosion-pipeline-cached', async (_event, bomPath, modelsDir, centerPart) => {
+  if (!bomPath || !fs.existsSync(bomPath)) {
+    safeSend('pipeline-progress', 'ERROR: BOM file not found: ' + bomPath);
+    return;
+  }
+  if (centerPart != null && !validatePartName(centerPart)) {
+    safeSend('pipeline-progress', 'ERROR: invalid centerPart name');
+    return;
+  }
+
+  const modelsDirResolved = modelsDir || path.dirname(bomPath);
+  const outputDir = _tsOutputDir(bomPath.replace(/\\/g, '/').replace(/\.xlsx$/i, ''));
+  registerAllowedRoot(outputDir);
+  registerAllowedRoot(modelsDirResolved);
+  const { exePath, baseArgs } = findPipelineExe();
+
+  const args = [
+    ...baseArgs,
+    bomPath,
+    '--bom', bomPath,
+    '--models-dir', modelsDirResolved,
+    '--output-dir', outputDir,
+    '--skip-collision',
+  ];
+  if (centerPart) {
+    args.push('--center-part', centerPart);
+  }
+
+  const centerLabel = centerPart ? ' (中心: ' + centerPart + ')' : ' (几何重心)';
+  safeSend('pipeline-progress', '=== BOM 爆炸视图' + centerLabel + ' ===');
+  safeSend('pipeline-mode', 'bom-full');
+  safeSend('pipeline-started', bomPath);
+
+  const env = buildPipelineEnv();
+  const proc = spawnPipeline(exePath, args, env);
+
+  proc.on('close', (code) => {
+    if (code === 0) {
+      const jsonPath = path.join(outputDir, 'assembly.json');
+      safeSend('pipeline-complete', jsonPath);
+    } else {
+      safeSend('pipeline-progress', 'BOM 爆炸视图失败，退出码: ' + code);
+      safeSend('pipeline-error', code);
+    }
+  });
+});
+
 // ── Pipeline: Preview STP (mesh + load, no analysis) ────
 
 async function runPreviewPipeline() {
@@ -556,22 +669,6 @@ function spawnPipeline(exePath, args, env) {
     safeSend('pipeline-error', -1);
   });
 
-  const lineHandler = (channel, prefix = '') => {
-    let buf = '';
-    return (chunk) => {
-      try {
-        buf += chunk.toString('utf8');
-        const lines = buf.split(/\r?\n/);
-        buf = lines.pop();
-        for (const line of lines) {
-          if (line.length === 0) continue;
-          safeSend(channel, prefix + line);
-        }
-      } catch (e) {
-        // ignore decoding hiccups
-      }
-    };
-  };
   const stdoutFlush = (() => {
     let buf = '';
     return {
@@ -634,9 +731,9 @@ function killAllPipelines() {
   }, 3000);
 }
 
-async function runImportPipeline() {
+async function runExplosionPipeline() {
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: '选择 STP 数模文件',
+    title: '选择 STP 数模文件 (生成爆炸路径)',
     filters: [{ name: 'STEP 模型', extensions: ['stp', 'step'] }],
     properties: ['openFile'],
   });
@@ -655,7 +752,45 @@ async function runImportPipeline() {
     '--skip-collision',
   ];
 
-  safeSend('pipeline-progress', '=== 导入 STP 生成拆卸方案 ===');
+  safeSend('pipeline-progress', '=== 生成爆炸路径 ===');
+  safeSend('pipeline-mode', 'full');
+  safeSend('pipeline-started', stpPath);
+
+  const env = buildPipelineEnv();
+  const proc = spawnPipeline(exePath, args, env);
+
+  proc.on('close', (code) => {
+    if (code === 0) {
+      const jsonPath = path.join(outputDir, 'assembly.json');
+      safeSend('pipeline-complete', jsonPath);
+    } else {
+      safeSend('pipeline-progress', '管线执行失败，退出码: ' + code);
+      safeSend('pipeline-error', code);
+    }
+  });
+}
+
+async function runImportPipeline() {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择 STP 数模文件 (生成拆装方案)',
+    filters: [{ name: 'STEP 模型', extensions: ['stp', 'step'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths[0]) return;
+
+  const stpPath = result.filePaths[0];
+  const outputDir = _tsOutputDir(stpPath);
+  registerAllowedRoot(outputDir);
+  registerAllowedRoot(path.dirname(stpPath));
+  const { exePath, baseArgs } = findPipelineExe();
+
+  const args = [
+    ...baseArgs,
+    stpPath,
+    '--output-dir', outputDir,
+  ];
+
+  safeSend('pipeline-progress', '=== 导入 STP 生成拆装方案 ===');
   safeSend('pipeline-mode', 'full');
   safeSend('pipeline-started', stpPath);
 

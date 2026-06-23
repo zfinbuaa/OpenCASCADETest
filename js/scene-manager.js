@@ -43,8 +43,6 @@ export class SceneManager {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.target.set(0, 500, 0);
-    this.controls.minPolarAngle = 0.001;
-    this.controls.maxPolarAngle = Math.PI * 0.999;
     this.controls.update();
 
     this._sceneCenter = new THREE.Vector3(0, 0, 0);
@@ -90,9 +88,7 @@ export class SceneManager {
   }
 
   resetCamera() {
-    this.camera.position.set(2000, 1500, 2500);
-    this.controls.target.set(0, 500, 0);
-    this.controls.update();
+    this._viewFromDirection(1, 0.7, 1);
   }
 
   focusOn(center, diagonal = 2000) {
@@ -115,13 +111,12 @@ export class SceneManager {
     this.controls.update();
   }
 
-  viewFront()  { this._viewFromDirection(0, 0, 1); }
-  viewBack()   { this._viewFromDirection(0, 0, -1); }
-  viewLeft()   { this._viewFromDirection(-1, 0, 0); }
-  viewRight()  { this._viewFromDirection(1, 0, 0); }
-  viewTop()    { this._viewFromDirection(0, 1, 0.001); }
-  viewBottom() { this._viewFromDirection(0, -1, 0.001); }
-  viewIsometric() { this._viewFromDirection(1, 0.7, 1); }
+  viewLeftRear()   { this._viewFromDirection(-1, 0.7, -1); }
+  viewLeftFront()  { this._viewFromDirection(-1, 0.7, 1); }
+  viewRightRear()  { this._viewFromDirection(1, 0.7, -1); }
+  viewRightFront() { this._viewFromDirection(1, 0.7, 1); }
+  viewTop()        { this._viewFromDirection(0, 1, 0.001); }
+  viewBottom()     { this._viewFromDirection(0, -1, 0.001); }
 
   getSceneCenter() {
     const box = new THREE.Box3();

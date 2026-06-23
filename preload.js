@@ -65,6 +65,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Run preview pipeline (STP → mesh + glb, no analysis). */
   runPreviewPipeline: () => ipcRenderer.invoke('run-preview-pipeline'),
 
+  /** Run geometric explosion pipeline (single STP) with optional center part. */
+  runExplosionPipelineWithCenter: (stpPath, centerPart) =>
+    ipcRenderer.invoke('run-explosion-pipeline-with-center', stpPath, centerPart),
+
+  /** Run geometric explosion pipeline (BOM mode) with optional center part. */
+  runBomExplosionPipelineCached: (bomPath, modelsDir, centerPart) =>
+    ipcRenderer.invoke('run-bom-explosion-pipeline-cached', bomPath, modelsDir, centerPart),
+
   // ── Pipeline ──────────────────────────────────────────
 
   /** Listen for pipeline stdout progress lines. */
@@ -90,11 +98,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Menu: View > Reset camera */
   onMenuResetCamera: (callback) => exclusiveOn('menu-reset-camera', callback),
 
-  /** Menu: View > Toggle ghost mode */
-  onMenuToggleGhost: (callback) => exclusiveOn('menu-toggle-ghost', callback),
+  /** Menu: View > 左后方 */
+  onMenuViewLeftRear: (callback) => exclusiveOn('menu-view-left-rear', callback),
 
-  /** Menu: View > Toggle annotations */
-  onMenuToggleAnnotations: (callback) => exclusiveOn('menu-toggle-annotations', callback),
+  /** Menu: View > 左前方 */
+  onMenuViewLeftFront: (callback) => exclusiveOn('menu-view-left-front', callback),
+
+  /** Menu: View > 右后方 */
+  onMenuViewRightRear: (callback) => exclusiveOn('menu-view-right-rear', callback),
+
+  /** Menu: View > 右前方 */
+  onMenuViewRightFront: (callback) => exclusiveOn('menu-view-right-front', callback),
+
+  /** Menu: View > 俯视 */
+  onMenuViewTop: (callback) => exclusiveOn('menu-view-top', callback),
+
+  /** Menu: View > 仰视 */
+  onMenuViewBottom: (callback) => exclusiveOn('menu-view-bottom', callback),
 
   /** Menu: Export > Screenshot */
   onMenuScreenshot: (callback) => exclusiveOn('menu-screenshot', callback),

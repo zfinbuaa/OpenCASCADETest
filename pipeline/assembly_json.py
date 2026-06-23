@@ -105,8 +105,12 @@ def build_assembly_json(parts, stages, source_file, contacts=None,
         if entry["name"] in verified_directions:
             entry["direction"] = verified_directions[entry["name"]]
         if entry["name"] in distance_multipliers:
-            entry["distanceMultiplier"] = distance_multipliers[entry["name"]]
-            entry["safeDistance"] = round(float(distance_multipliers[entry["name"]]) * 150.0, 1)
+            mult = float(distance_multipliers[entry["name"]])
+            entry["distanceMultiplier"] = mult
+            # explosionDistance (front-end animation base) * multiplier ≈ scaled travel.
+            # Note: this is the animation distance, not raw collision safe_distance,
+            # because distance_multipliers already encodes depth_factor and stage_factor.
+            entry["explosionDistance"] = round(mult * 150.0, 1)
 
     groups = []
     for entry in part_entries:
@@ -191,6 +195,9 @@ def build_part_entry(part, index):
 
     if part.get("bomSource"):
         entry["bomSource"] = part["bomSource"]
+
+    if part.get("isExplosionCenter"):
+        entry["isExplosionCenter"] = True
 
     return entry
 
