@@ -132,7 +132,8 @@ def _simulate_dir_blockers(target_name, part_map, all_part_names,
                             chain_set, skip_set, direction, collision_data,
                             max_distance, sub_assemblies=None,
                             sa_bbox_cache=None,
-                            target_shape_override=None):
+                            target_shape_override=None,
+                            interference_tolerance=0.0):
     """
     Probe one direction and return ALL parts blocking the path.
 
@@ -170,7 +171,8 @@ def _simulate_dir_blockers(target_name, part_map, all_part_names,
     result = check_disassembly_path(
         target_name, target_shape, obstacles, direction,
         max_distance, collision_data=collision_data,
-        report_all_collisions=True)
+        report_all_collisions=True,
+        interference_tolerance=interference_tolerance)
 
     blockers = result.get("collision_names", [])
     if not blockers and result.get("collision_with"):
@@ -195,7 +197,9 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
                              chain_set, skip_set, depth, max_depth,
                              centroids, sim_cache, best_so_far=None,
                              sub_assemblies=None, sa_bbox_cache=None,
-                             target_shape_override=None):
+                             target_shape_override=None,
+                             interference_tolerance=0.0,
+                             _in_progress=None):
     """
     Find the optimal disassembly direction for `target_name`.
 
@@ -209,6 +213,7 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
         sa_bbox_cache: precomputed compound bbox cache for spatial filtering.
         target_shape_override: if provided, use this shape for collision checks
             instead of part_map[target_name]["shape"] (for sub-assembly targets).
+        _in_progress: internal set to detect cyclic dependencies.
 
     Returns:
         dict: {
@@ -222,6 +227,16 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
         }
     """
     from pipeline.collision_check import find_all_blockers, filter_obstacles_by_compound_bbox
+
+    if _in_progress is None:
+        _in_progress = set()
+
+    if target_name in _in_progress:
+        return {
+            "feasible": False, "direction": [0, 1, 0], "blockers": [],
+            "cost": _INF, "chain_depth": 1, "safe_distance": 0.0, "considered": [],
+            "deadlock": True, "note": "cyclic dependency",
+        }
 
     if depth > max_depth:
         return {
@@ -246,6 +261,8 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
         sim_cache[cache_key] = result
         return result
 
+    _in_progress.add(target_name)
+
     target_shape = target_shape_override if target_shape_override is not None else part_map[target_name]["shape"]
     preferred_dir = verified_dirs.get(target_name, [0, 1, 0])
 
@@ -260,7 +277,8 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
 
     sweep = find_all_blockers(
         target_name, target_shape, obstacles, preferred_dir,
-        max_distance, collision_data, max_directions=8)
+        max_distance, collision_data, max_directions=8,
+        interference_tolerance=interference_tolerance)
 
     feasible_dirs = []
     blocked_dirs = []
@@ -292,6 +310,7 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
             "considered": considered_summary,
         }
         sim_cache[cache_key] = result
+        _in_progress.discard(target_name)
         return result
 
     candidates = []
@@ -325,6 +344,7 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
             "considered": [], "deadlock": True,
         }
         sim_cache[cache_key] = result
+        _in_progress.discard(target_name)
         return result
 
     best = None
@@ -335,7 +355,8 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
             chain_set, skip_set, cand["direction"], collision_data,
             max_distance, sub_assemblies=sub_assemblies,
             sa_bbox_cache=sa_bbox_cache,
-            target_shape_override=target_shape_override)
+            target_shape_override=target_shape_override,
+            interference_tolerance=interference_tolerance)
 
         if true_feasible:
             cand_result = {
@@ -385,7 +406,9 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
                 centroids, sim_cache,
                 best_so_far=budget - cumulative_cost,
                 sub_assemblies=sub_assemblies,
-                sa_bbox_cache=sa_bbox_cache)
+                sa_bbox_cache=sa_bbox_cache,
+                interference_tolerance=interference_tolerance,
+                _in_progress=_in_progress)
 
             cumulative_cost += sub["cost"]
             max_sub_depth = max(max_sub_depth, sub["chain_depth"])
@@ -438,6 +461,7 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
         "considered": considered_summary,
     }
     sim_cache[cache_key] = result
+    _in_progress.discard(target_name)
     return result
 
 
@@ -452,9 +476,10 @@ def _better(a, b):
 
 
 def compute_dependency_chain(parts, directions, collision_data,
-                              target_name, max_distance=500.0,
+                              target_name, max_distance=100.0,
                               assembly_centroid=None, sub_assemblies=None,
-                              max_recursion=50, optimize_direction=True):
+                              max_recursion=50, optimize_direction=True,
+                              interference_tolerance=0.0):
     """
     Compute the disassembly dependency chain for a target part.
 
@@ -468,7 +493,7 @@ def compute_dependency_chain(parts, directions, collision_data,
         sub_assemblies: list of sub-assembly dicts (resolves sub-assembly target).
         max_recursion: max recursion depth.
         optimize_direction: if True, choose direction with fewest total removals.
-            If False, use legacy behavior (recurse on union of all blockers).
+        interference_tolerance: ignore penetrations up to this distance (mm).
 
     Returns:
         tuple: (stages, verified_directions, distance_multipliers, details)
@@ -520,7 +545,8 @@ def compute_dependency_chain(parts, directions, collision_data,
                    centroids, skip_for_target, optimize_direction,
                    sub_assemblies=sub_assemblies,
                    sa_bbox_cache=sa_bbox_cache,
-                   target_shape_override=target_shape)
+                   target_shape_override=target_shape,
+                   interference_tolerance=interference_tolerance)
 
     if node_is_sub_assembly:
         # For sub-assembly targets, treat the entire node as a single unit.
@@ -571,7 +597,9 @@ def _resolve_chain(target_name, part_map, all_part_names,
                    centroids, skip_obstacles=None,
                    optimize_direction=True,
                    sub_assemblies=None, sa_bbox_cache=None,
-                   target_shape_override=None):
+                   target_shape_override=None,
+                   _in_progress=None,
+                   interference_tolerance=0.0):
     """
     Recursively resolve the dependency chain for a target part.
 
@@ -584,16 +612,35 @@ def _resolve_chain(target_name, part_map, all_part_names,
         target_shape_override: if provided, use this shape instead of
             part_map[target_name]["shape"] for collision checking (used for
             sub-assembly targets that are treated as a single rigid body).
+        _in_progress: internal set to detect cyclic dependencies.
     """
+    if _in_progress is None:
+        _in_progress = set()
+
+    if target_name in _in_progress:
+        sys.stdout.write("  [depth={}] '{}' deadlock: cyclic dependency detected\n".format(
+            depth, target_name))
+        sys.stdout.flush()
+        details.append({
+            "part": target_name, "stage": 0, "feasible": False,
+            "depth": depth, "note": "deadlock: cyclic dependency",
+        })
+        return
+
+    _in_progress.add(target_name)
+
     if target_name in chain_set:
+        _in_progress.discard(target_name)
         return
     if depth > max_depth:
         logger.warning("dependency chain max depth %d reached for %s",
                        max_depth, target_name)
+        _in_progress.discard(target_name)
         return
 
     if target_name not in part_map:
         logger.warning("target '%s' not in part_map, skipping", target_name)
+        _in_progress.discard(target_name)
         return
 
     skip_set = skip_obstacles or set()
@@ -608,7 +655,8 @@ def _resolve_chain(target_name, part_map, all_part_names,
             centroids, sim_cache,
             sub_assemblies=sub_assemblies,
             sa_bbox_cache=sa_bbox_cache,
-            target_shape_override=target_shape)
+            target_shape_override=target_shape,
+            interference_tolerance=interference_tolerance)
 
         verified_dirs[target_name] = plan["direction"]
 
@@ -635,6 +683,7 @@ def _resolve_chain(target_name, part_map, all_part_names,
                 "considered_directions": considered,
                 "expected_chain_cost": plan["cost"],
             })
+            _in_progress.discard(target_name)
             return
 
         for blocker in plan["blockers"]:
@@ -645,9 +694,12 @@ def _resolve_chain(target_name, part_map, all_part_names,
                            skip_obstacles=skip_set,
                            optimize_direction=optimize_direction,
                            sub_assemblies=sub_assemblies,
-                           sa_bbox_cache=sa_bbox_cache)
+                           sa_bbox_cache=sa_bbox_cache,
+                           _in_progress=_in_progress,
+                           interference_tolerance=interference_tolerance)
 
         if target_name in chain_set:
+            _in_progress.discard(target_name)
             return
 
         from pipeline.collision_check import check_disassembly_path, filter_obstacles_by_compound_bbox
@@ -666,7 +718,8 @@ def _resolve_chain(target_name, part_map, all_part_names,
             target_name, target_shape,
             recheck_obstacles, plan["direction"],
             max_distance, collision_data=collision_data,
-            report_all_collisions=True)
+            report_all_collisions=True,
+            interference_tolerance=interference_tolerance)
 
         chain_order.append(target_name)
         chain_set.add(target_name)
@@ -686,6 +739,7 @@ def _resolve_chain(target_name, part_map, all_part_names,
             "note": "feasible after blocker resolution" if recheck.get("feasible")
                 else "deadlock: residual {}".format(residual[:3]),
         })
+        _in_progress.discard(target_name)
         return
 
     from pipeline.collision_check import find_all_blockers, filter_obstacles_by_compound_bbox
@@ -709,7 +763,8 @@ def _resolve_chain(target_name, part_map, all_part_names,
 
     result = find_all_blockers(
         target_name, target_shape, obstacles, preferred_dir,
-        max_distance, collision_data, max_directions=8)
+        max_distance, collision_data, max_directions=8,
+        interference_tolerance=interference_tolerance)
 
     verified_dirs[target_name] = result["best_direction"]
 
@@ -724,6 +779,7 @@ def _resolve_chain(target_name, part_map, all_part_names,
             "safe_distance": result["best_result"]["max_safe_distance"],
             "depth": depth,
         })
+        _in_progress.discard(target_name)
         return
 
     all_blockers = result["blockers"]
@@ -746,6 +802,7 @@ def _resolve_chain(target_name, part_map, all_part_names,
             "depth": depth,
             "note": "no resolvable blockers, force-removed",
         })
+        _in_progress.discard(target_name)
         return
 
     target_centroid = centroids.get(target_name, np.array([0.0, 0.0, 0.0]))
@@ -762,9 +819,12 @@ def _resolve_chain(target_name, part_map, all_part_names,
                        verified_dirs, collision_data, max_distance,
                        chain_order, chain_set, details, depth + 1, max_depth,
                        centroids, skip_obstacles=skip_set,
-                       optimize_direction=optimize_direction)
+                       optimize_direction=optimize_direction,
+                       _in_progress=_in_progress,
+                       interference_tolerance=interference_tolerance)
 
     if target_name in chain_set:
+        _in_progress.discard(target_name)
         return
 
     recheck_obstacles = [(n, part_map[n]["shape"])
@@ -776,7 +836,8 @@ def _resolve_chain(target_name, part_map, all_part_names,
     recheck = find_all_blockers(
         target_name, target_shape, recheck_obstacles,
         verified_dirs.get(target_name, result["best_direction"]),
-        max_distance, collision_data)
+        max_distance, collision_data,
+        interference_tolerance=interference_tolerance)
 
     verified_dirs[target_name] = recheck["best_direction"]
 
@@ -807,3 +868,5 @@ def _resolve_chain(target_name, part_map, all_part_names,
             "note": "deadlock: residual blockers {}, force-removed".format(
                 residual[:5]),
         })
+
+    _in_progress.discard(target_name)

@@ -2,9 +2,9 @@
  * 整车数模自动拆装方案系统 — Electron 桌面应用
  *
  * 单一场景架构：一个视口 + 一个渲染器 + 一个场景。
- * 三个 Tab 共享同一份模型数据（shared），各自维护独立的爆炸/树状态。
+ * 四个 Tab 共享同一份模型数据（shared），各自维护独立的爆炸/树状态。
  */
-
+ 
 import * as THREE from '../node_modules/three/build/three.module.js';
 import { ModelLoader } from './model-loader.js';
 import { SceneManager } from './scene-manager.js';
@@ -30,7 +30,7 @@ let activeTab = 0;
 let pipelineMode = null;
 
 // ── Shared singletons ─────────────────────────────────────
-const sm = new SceneManager(viewport, { backgroundColor: 0xffffff });
+const sm = new SceneManager(viewport, { backgroundColor: 0xffffff, onRender: () => annot.draw() });
 const modelLoader = new ModelLoader();
 const bodyLoader = new BodyLoader();
 const annot = new Annotation(sm.scene, sm.camera, viewport);
@@ -53,13 +53,17 @@ const shared = {
   bomSourcePath: null,
   bomModelsDir: null,
   explosionCenter: null,
+  compounds: [],
+  bomCompounds: [],
 };
 
 // ── Per-tab state ─────────────────────────────────────────
 const tabs = [
   { mode: 'position', tree: null },
   { mode: 'explosion', tree: null },
-  { mode: 'sequence', tree: null },
+  { mode: 'serviceability', tree: null },
+  { mode: 'manual', tree: null },
+  { mode: 'clean', tree: null },
 ];
 
 const sharedExplo = new ExplosionView(sm.scene, sm.camera, sm.renderer.domElement, sm.controls);
@@ -81,7 +85,7 @@ function switchTab(idx) {
   activeTab = idx;
   tabBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
 
-  const titles = ['位置图', '爆炸图', '拆装方案'];
+  const titles = ['位置图', '爆炸图', '拆装方案（可维修性）', '拆装方案（维修手册）', '数模清洗'];
   panelHeader.textContent = titles[idx];
 
   renderPanel(idx);
@@ -94,7 +98,9 @@ function renderPanel(idx) {
   switch (idx) {
     case 0: renderPositionPanel(); break;
     case 1: renderExplosionPanel(); break;
-    case 2: renderDisassemblyPanel(); break;
+    case 2: renderServiceabilityPanel(); break;
+    case 3: renderManualPanel(); break;
+    case 4: renderCleanPanel(); break;
   }
 }
 
@@ -241,12 +247,16 @@ function renderExplosionPanel() {
   bindExplosionPanel();
 }
 
-function renderDisassemblyPanel() {
+function renderServiceabilityPanel() {
   let h = '';
   h += '<div class="section-title">管线进度</div>';
   h += '<div id="pipeline-log-placeholder" style="margin:4px 10px;padding:6px;background:#0a0a1a;border-radius:3px;font-family:Consolas,monospace;font-size:9px;color:#7ec8e3;max-height:120px;overflow-y:auto;"></div>';
-  h += '<div class="section-title">加载</div>';
-  h += '<div class="btn-group"><button class="btn btn-pri" id="btn-load">加载 JSON</button></div>';
+  h += '<div class="section-title">编组管理</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-create-compound">勾选部件 → 创建编组</button>';
+  h += '<button class="btn btn-outline" id="btn-clear-compounds">清空编组</button>';
+  h += '</div>';
+  h += '<div id="compound-preview" style="margin:4px 10px;font-size:10px;color:#889;min-height:18px;">未创建编组</div>';
   h += '<div class="section-title">依赖链分析</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-pri" id="btn-pipeline-chain">选中目标 → 分析拆卸链</button>';
@@ -270,7 +280,73 @@ function renderDisassemblyPanel() {
   h += '<button class="btn btn-outline" id="btn-chain-reset">复位</button>';
   h += '</div>';
   panelBody.innerHTML = h;
-  bindDisassemblyPanel();
+  bindServiceabilityPanel();
+}
+
+function renderManualPanel() {
+  let h = '';
+  h += '<div class="section-title">管线进度</div>';
+  h += '<div id="pipeline-log-placeholder" style="margin:4px 10px;padding:6px;background:#0a0a1a;border-radius:3px;font-family:Consolas,monospace;font-size:9px;color:#7ec8e3;max-height:120px;overflow-y:auto;"></div>';
+  h += '<div class="section-title">数据加载</div>';
+  h += '<div class="btn-group"><button class="btn btn-pri" id="btn-load-bom-manual">加载 BOM (多文件)</button></div>';
+  h += '<div class="section-title">依赖链分析</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-pri" id="btn-pipeline-chain-manual">选中目标 → 分析拆卸链</button>';
+  h += '<span id="sel-node-display-manual" style="padding:5px;color:#7ec8e3;font-size:11px;">未选中</span>';
+  h += '</div>';
+  h += '<div class="section-title">全量拆装</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-pipeline-node-manual">选中节点 → 生成拆装方案</button>';
+  h += '</div>';
+  h += '<div class="section-title">拆卸演示</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-pri" id="btn-disassemble-manual">逐件拆卸演示</button>';
+  h += '<button class="btn btn-outline" id="btn-step-manual">单步拆卸</button>';
+  h += '<button class="btn btn-outline" id="btn-restore-manual">复位全部</button>';
+  h += '</div>';
+  h += '<div class="section-title">依赖链演示</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-pri" id="btn-chain-demo-manual">AI最佳拆装路径</button>';
+  h += '<button class="btn btn-outline" id="btn-chain-reset-manual">复位</button>';
+  h += '</div>';
+  panelBody.innerHTML = h;
+  bindManualPanel();
+}
+
+function renderCleanPanel() {
+  let h = '';
+  h += '<div class="section-title">管线进度</div>';
+  h += '<div id="pipeline-log-placeholder" style="margin:4px 10px;padding:6px;background:#0a0a1a;border-radius:3px;font-family:Consolas,monospace;font-size:9px;color:#7ec8e3;max-height:120px;overflow-y:auto;"></div>';
+  h += '<div class="section-title">数据加载</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-pri" id="btn-clean-run">加载 STP + BOM 并清洗</button>';
+  h += '</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-clean-load-result">加载清洗结果 JSON</button>';
+  h += '</div>';
+  h += '<div class="section-title">清洗步骤</div>';
+  h += '<div style="margin:4px 12px;font-size:11px;color:#889;">';
+  h += '<ol style="padding-left:18px;line-height:1.6">';
+  h += '<li>J列名称匹配 — 保留与BOM J列相关的零件</li>';
+  h += '<li>干涉检查 — 保留不干涉匹配零件的其他件</li>';
+  h += '<li>形状去重 — 移除位置/形状重复的堆叠件</li>';
+  h += '<li>清除其余 — 输出清洗后结果</li>';
+  h += '</ol></div>';
+  h += '<div class="section-title">导出</div>';
+  h += '<div class="btn-group"><button class="btn btn-outline" id="btn-export-clean">导出 PNG</button></div>';
+  panelBody.innerHTML = h;
+  bindCleanPanel();
+}
+
+function bindCleanPanel() {
+  document.getElementById('btn-clean-run')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    statusBar.textContent = '启动数模清洗...';
+    await window.electronAPI.runCleanPipeline();
+  });
+  document.getElementById('btn-clean-load-result')?.addEventListener('click', loadAssembly);
+  document.getElementById('btn-export-clean')?.addEventListener('click', _exportSimple);
+  buildActiveTree();
 }
 
 // ── Panel Event Binders ──────────────────────────────────
@@ -461,10 +537,9 @@ function bindPositionPanel() {
   });
 
   document.getElementById('btn-annot-show')?.addEventListener('click', () => {
-    if (shared.assembly) annot.setParts(shared.assembly.parts, shared.checkedNodes);
+    if (shared.assembly) annot.setParts(shared.assembly.parts, null, shared.compounds);
     annot.setHiddenPartIds(shared.hiddenPartIds);
     annot.show();
-    annot.draw();
   });
 
   document.getElementById('btn-annot-hide')?.addEventListener('click', () => annot.clear());
@@ -546,10 +621,9 @@ function bindExplosionPanel() {
   document.getElementById('btn-manual-on')?.addEventListener('click', () => sharedExplo.enableManualMode());
   document.getElementById('btn-manual-off')?.addEventListener('click', () => sharedExplo.disableManualMode());
   document.getElementById('btn-annot-show')?.addEventListener('click', () => {
-    if (shared.assembly) annot.setParts(shared.assembly.parts, shared.checkedNodes);
+    if (shared.assembly) annot.setParts(shared.assembly.parts, null, shared.compounds);
     annot.setHiddenPartIds(shared.hiddenPartIds);
     annot.show();
-    annot.draw();
   });
   document.getElementById('btn-annot-hide')?.addEventListener('click', () => annot.clear());
   document.getElementById('btn-thrust')?.addEventListener('click', () => sharedExplo.toggleThrustLines());
@@ -559,38 +633,19 @@ function bindExplosionPanel() {
   _updateCenterDisplay();
 }
 
-function bindDisassemblyPanel() {
-  document.getElementById('btn-load')?.addEventListener('click', loadAssembly);
-
+function bindServiceabilityPanel() {
   document.getElementById('btn-pipeline-chain')?.addEventListener('click', async () => {
     if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
-
     const targetPart = _resolveTargetPart();
-    if (!targetPart) {
-      _showTargetHint();
+    if (!targetPart) { _showTargetHint(); return; }
+    if (!shared.sourceStpPath) {
+      _showModal('无可用数据', '请先通过 <b>Ctrl+I</b> 导入单文件 STP');
       return;
     }
-
-    const hasBom = !!shared.bomSourcePath;
-    const hasStp = !!shared.sourceStpPath;
-
-    if (!hasBom && !hasStp) {
-      _showModal('无可用数据',
-        '请先加载装配数据再进行依赖链分析:<br><br>' +
-        '<ul><li>方法1: 通过 <b>位置图 → 加载BOM</b> 加载多文件 BOM</li>' +
-        '<li>方法2: 通过 <b>Ctrl+I</b> 导入单文件 STP</li></ul>');
-      return;
-    }
-
     statusBar.textContent = '分析拆卸依赖链: ' + targetPart + '...';
-
-    if (hasBom) {
-      await window.electronAPI.runBomFullPipelineCached(
-        shared.bomSourcePath, shared.bomModelsDir, targetPart);
-    } else {
-      await window.electronAPI.runSinglePipelineChain(
-        shared.sourceStpPath, targetPart);
-    }
+    const compoundsJson = JSON.stringify(shared.compounds || []);
+    await window.electronAPI.runSinglePipelineChain(
+      shared.sourceStpPath, targetPart, compoundsJson);
   });
   document.getElementById('btn-export')?.addEventListener('click', _exportSimple);
   document.getElementById('btn-pipeline-node')?.addEventListener('click', async () => {
@@ -601,13 +656,114 @@ function bindDisassemblyPanel() {
     if (!nodeName) { statusBar.textContent = '请先在结构树中勾选或选择一个节点'; return; }
     if (!shared.sourceStpPath) { statusBar.textContent = '请先导入 STP 预览 (Ctrl+I)'; return; }
     statusBar.textContent = '启动管线 (节点: ' + nodeName + ')...';
-    await window.electronAPI.runPipelineForNodeCached(shared.sourceStpPath, nodeName);
+    const compoundsJson = JSON.stringify(shared.compounds || []);
+    await window.electronAPI.runPipelineForNodeCached(
+      shared.sourceStpPath, nodeName, compoundsJson);
   });
+  document.getElementById('btn-create-compound')?.addEventListener('click', _createCompoundFromChecked);
+  document.getElementById('btn-clear-compounds')?.addEventListener('click', _clearAllCompounds);
   _bindChainDemoButtons();
   _bindDisassemblyButtons();
   buildActiveTree();
+  _updateCompoundPreview();
   const display = document.getElementById('sel-node-display');
   if (display) display.textContent = shared.selectedNode || '未选中';
+}
+
+function bindManualPanel() {
+  document.getElementById('btn-load-bom-manual')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    statusBar.textContent = '加载 BOM...';
+    await window.electronAPI.runBomPreviewPipeline();
+  });
+  document.getElementById('btn-pipeline-chain-manual')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    const targetPart = _resolveTargetPart();
+    if (!targetPart) { _showTargetHint(); return; }
+    if (!shared.bomSourcePath) {
+      _showModal('无可用数据', '请先通过 <b>加载 BOM</b> 导入多文件 BOM');
+      return;
+    }
+    statusBar.textContent = '分析拆卸依赖链: ' + targetPart + '...';
+    await window.electronAPI.runBomFullPipelineCached(
+      shared.bomSourcePath, shared.bomModelsDir, targetPart);
+  });
+  document.getElementById('btn-pipeline-node-manual')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    const nodeName = shared.checkedPartIds.size > 0
+      ? (tabs[activeTab].tree ? tabs[activeTab].tree.getCheckedNodeId() : null)
+      : shared.selectedNode;
+    if (!nodeName) { statusBar.textContent = '请先在结构树中勾选或选择一个节点'; return; }
+    if (!shared.bomSourcePath) { statusBar.textContent = '请先加载 BOM'; return; }
+    statusBar.textContent = '启动管线 (BOM节点: ' + nodeName + ')...';
+    await window.electronAPI.runBomFullPipelineCached(
+      shared.bomSourcePath, shared.bomModelsDir, nodeName);
+  });
+  const ids = ['btn-chain-demo', 'btn-chain-reset', 'btn-disassemble', 'btn-step', 'btn-restore'];
+  for (const baseId of ids) {
+    const btn = document.getElementById(baseId + '-manual');
+    if (btn) {
+      const orig = document.getElementById(baseId);
+      if (orig) btn.addEventListener('click', () => orig.click());
+    }
+  }
+  buildActiveTree();
+  const display = document.getElementById('sel-node-display-manual');
+  if (display) display.textContent = shared.selectedNode || '未选中';
+}
+
+// ── Compound management ─────────────────────────────────
+
+function _createCompoundFromChecked() {
+  const tree = tabs[activeTab].tree;
+  if (!tree) { statusBar.textContent = '请先加载装配数据'; return; }
+  const checkedIds = Array.from(shared.checkedPartIds || []);
+  if (checkedIds.length === 0) {
+    statusBar.textContent = '请先在结构树中勾选要编组的零件，或按住 Ctrl 点击多个零件';
+    return;
+  }
+  const name = '组_' + (shared.compounds.length + 1);
+  const compound = { name, members: [...checkedIds] };
+  shared.compounds.push(compound);
+  tree.addCompound(name, checkedIds, _randColor());
+  tree.clearChecked();
+  _updateCompoundPreview();
+  statusBar.textContent = '已创建编组: ' + name + ' (' + checkedIds.length + ' 件)';
+}
+
+function _clearAllCompounds() {
+  shared.compounds = [];
+  const tree = tabs[activeTab].tree;
+  if (tree) tree.clearCompounds();
+  _updateCompoundPreview();
+  statusBar.textContent = '已清空所有编组';
+}
+
+function _updateCompoundPreview() {
+  const el = document.getElementById('compound-preview');
+  if (!el) return;
+  if (shared.compounds.length === 0) {
+    el.textContent = '未创建编组';
+  } else {
+    const items = shared.compounds.map(c => c.name + '(' + c.members.length + '件)').join(', ');
+    el.textContent = '编组: ' + items;
+  }
+}
+
+let _compoundColorIdx = 0;
+function _randColor() {
+  const colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22', '#34495e'];
+  return colors[_compoundColorIdx++ % colors.length];
+}
+
+function _restoreCompoundsToTree() {
+  const tree = tabs[activeTab].tree;
+  if (!tree || !shared.compounds || shared.compounds.length === 0) return;
+  tree.clearCompounds();
+  for (const c of shared.compounds) {
+    tree.addCompound(c.name, c.members, _randColor());
+  }
+  _updateCompoundPreview();
 }
 
 function _resolveTargetPart() {
@@ -782,6 +938,42 @@ function buildActiveTree() {
       _applyVisibilityToScene();
       const count = shared.hiddenPartIds.size;
       statusBar.textContent = visible ? '已显示: ' + partIds.length + ' 零件' : '已隐藏: ' + partIds.length + ' 零件 (共' + count + ')';
+    },
+    onCompoundSelect: (name, members) => {
+      shared.selectedNode = name;
+      _highlightParts(members);
+      statusBar.textContent = '选中编组: ' + name + ' (' + members.length + ' 件)';
+      const d1 = document.getElementById('sel-node-display');
+      if (d1) d1.textContent = name;
+      const d2 = document.getElementById('sel-node-display-manual');
+      if (d2) d2.textContent = name;
+    },
+    onCompoundFocus: (name, members) => {
+      if (members.length > 0) {
+        const pid = members[0];
+        for (const mesh of shared.meshes) {
+          if (mesh.userData.partId === pid) {
+            const box = new THREE.Box3().setFromObject(mesh);
+            const c = new THREE.Vector3(); box.getCenter(c);
+            sm.focusOn(c, 300); break;
+          }
+        }
+      }
+    },
+    onCompoundColorChange: (name, row) => {
+      const c = _randColor();
+      if (row) row.querySelector('.swatch').style.background = c;
+      const comp = shared.compounds.find(x => x.name === name);
+      if (!comp) return;
+      for (const pid of comp.members) {
+        const colorObj = new THREE.Color(c);
+        for (const mesh of shared.meshes) {
+          if (mesh.userData.partId === pid && mesh.material) {
+            const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+            for (const mat of mats) { if (mat.color) mat.color.copy(colorObj); }
+          }
+        }
+      }
     },
   });
   t.tree.build(shared.hierarchy, shared.assembly.parts, shared.assembly.stages);
@@ -1077,6 +1269,20 @@ function _setupViewportClick() {
 
     const partId = intersects[0].object.userData.partId;
     if (!partId) return;
+
+    if (event.ctrlKey || event.metaKey) {
+      const tree = tabs[activeTab].tree;
+      if (!tree) return;
+      if (shared.checkedPartIds.has(partId)) {
+        shared.checkedPartIds.delete(partId);
+      } else {
+        shared.checkedPartIds.add(partId);
+      }
+      _highlightParts([...shared.checkedPartIds]);
+      statusBar.textContent = '已选编组: ' + shared.checkedPartIds.size + ' 零件';
+      return;
+    }
+
     _highlightPart(partId);
     statusBar.textContent = '选中: ' + partId;
   };
@@ -1169,6 +1375,7 @@ if (window.electronAPI) {
     if (log) log.innerHTML = '';
     _logPipeline('管线启动...');
     if (pipelineMode === 'full' || pipelineMode === 'bom-full') switchTab(2);
+    if (pipelineMode === 'clean') switchTab(4);
   });
   // Serialize concurrent pipeline-complete events so double-clicks don't race.
   let _loadingChain = Promise.resolve();
@@ -1176,9 +1383,12 @@ if (window.electronAPI) {
     _loadingChain = _loadingChain.then(async () => {
       try {
         _logPipeline('完成! ' + jsonPath);
-        const targetIdx = (pipelineMode === 'full' || pipelineMode === 'bom-full') ? 2 : activeTab;
+        let targetIdx = activeTab;
+        if (pipelineMode === 'full' || pipelineMode === 'bom-full') targetIdx = 2;
+        if (pipelineMode === 'clean') targetIdx = 0;
         await _loadPipelineResult(jsonPath, targetIdx);
         _renderBomList();
+        _restoreCompoundsToTree();
       } catch (err) {
         console.error('pipeline complete load failed:', err);
         statusBar.textContent = '加载失败: ' + (err && err.message);

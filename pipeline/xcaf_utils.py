@@ -39,23 +39,37 @@ def get_shape_name(label, shape_tool):
             try:
                 from OCC.Core.TCollection import TCollection_AsciiString
                 ext_str = name_attr.Get()
-                ascii_str = TCollection_AsciiString(ext_str)
+                ascii_str = TCollection_AsciiString(ext_str, "UTF8")
                 s = ascii_str.ToCString()
                 if s:
                     return s
             except (ImportError, Exception):
                 pass
-            # Fallback: parse Dump output (for older OCCT versions)
-            dump_output = name_attr.Dump()
-            if isinstance(dump_output, tuple) and len(dump_output) >= 2:
-                s = str(dump_output[1])
-                if "Name=|" in s:
-                    try:
-                        start = s.index("Name=|") + 6
-                        end = s.index("|", start)
-                        return s[start:end]
-                    except ValueError:
-                        pass
+            try:
+                ext_str = name_attr.Get()
+                length = ext_str.Length()
+                if length > 0:
+                    chars = []
+                    for i in range(1, length + 1):
+                        chars.append(chr(ext_str.Value(i)))
+                    s = ''.join(chars)
+                    if s:
+                        return s
+            except Exception:
+                pass
+            try:
+                dump_output = name_attr.Dump()
+                if isinstance(dump_output, tuple) and len(dump_output) >= 2:
+                    s = str(dump_output[1])
+                    if "Name=|" in s:
+                        try:
+                            start = s.index("Name=|") + 6
+                            end = s.index("|", start)
+                            return s[start:end]
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
     except Exception:
         pass
     return "Part_{}".format(label.Tag())

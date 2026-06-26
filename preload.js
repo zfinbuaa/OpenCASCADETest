@@ -46,9 +46,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   /** Run pipeline scoped to a specific sub-assembly node. */
   runPipelineForNode: (rootNode) => ipcRenderer.invoke('run-pipeline-for-node', rootNode),
-
   /** Run pipeline for node using cached STP path (no file dialog). */
-  runPipelineForNodeCached: (stpPath, rootNode) => ipcRenderer.invoke('run-pipeline-for-node-cached', stpPath, rootNode),
+  runPipelineForNodeCached: (stpPath, rootNode, compoundsJson) =>
+    ipcRenderer.invoke('run-pipeline-for-node-cached', stpPath, rootNode, compoundsJson),
 
   /** Run BOM preview pipeline (BOM → mesh + glb, no analysis). */
   runBomPreviewPipeline: () => ipcRenderer.invoke('run-bom-preview-pipeline'),
@@ -58,9 +58,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   /** Run BOM full pipeline with cached paths (no file dialog). */
   runBomFullPipelineCached: (bomPath, modelsDir, targetPart) => ipcRenderer.invoke('run-bom-full-pipeline-cached', bomPath, modelsDir, targetPart),
-
   /** Run single-file STP dependency chain analysis for a target part. */
-  runSinglePipelineChain: (stpPath, targetPart) => ipcRenderer.invoke('run-single-pipeline-chain', stpPath, targetPart),
+  runSinglePipelineChain: (stpPath, targetPart, compoundsJson) =>
+    ipcRenderer.invoke('run-single-pipeline-chain', stpPath, targetPart, compoundsJson),
 
   /** Run preview pipeline (STP → mesh + glb, no analysis). */
   runPreviewPipeline: () => ipcRenderer.invoke('run-preview-pipeline'),
@@ -72,6 +72,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Run geometric explosion pipeline (BOM mode) with optional center part. */
   runBomExplosionPipelineCached: (bomPath, modelsDir, centerPart) =>
     ipcRenderer.invoke('run-bom-explosion-pipeline-cached', bomPath, modelsDir, centerPart),
+
+  /** Run model cleaning pipeline (STP + XLSX → clean assembly). */
+  runCleanPipeline: () => ipcRenderer.invoke('run-clean-pipeline'),
 
   // ── Pipeline ──────────────────────────────────────────
 

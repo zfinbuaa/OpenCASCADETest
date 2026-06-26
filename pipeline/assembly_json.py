@@ -199,6 +199,11 @@ def build_part_entry(part, index):
     if part.get("isExplosionCenter"):
         entry["isExplosionCenter"] = True
 
+    if part.get("isCompound"):
+        entry["isCompound"] = True
+        if part.get("compoundMembers"):
+            entry["compoundMembers"] = part["compoundMembers"]
+
     return entry
 
 

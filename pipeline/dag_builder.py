@@ -46,7 +46,7 @@ def _compute_centroid(shape):
 
 
 def build_disassembly_dag_v2(parts, directions, collision_data,
-                              fasteners, max_distance=500.0,
+                              fasteners, max_distance=100.0,
                               assembly_centroid=None, sub_assemblies=None,
                               base_explosion_distance=150.0,
                               correct_directions=True):

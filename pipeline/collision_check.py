@@ -46,9 +46,16 @@ def _compute_aabb_np(vertices):
     return vertices.min(axis=0), vertices.max(axis=0)
 
 
-def _aabb_overlap_np(a_min, a_max, b_min, b_max):
-    """Check if two AABBs overlap."""
-    return bool(np.all(a_min <= b_max) and np.all(a_max >= b_min))
+def _aabb_overlap_np(a_min, a_max, b_min, b_max, margin=0.0):
+    """Check if two AABBs overlap, with optional interference margin.
+
+    When margin > 0, the second AABB (obstacle) is treated as shrunk by
+    margin on each side, effectively requiring the first AABB to penetrate
+    at least margin mm before a collision is reported.
+    """
+    if margin <= 0:
+        return bool(np.all(a_min <= b_max) and np.all(a_max >= b_min))
+    return bool(np.all(a_min <= b_max - margin) and np.all(a_max >= b_min + margin))
 
 
 class _AABBNode:
@@ -282,10 +289,12 @@ def _point_in_triangle_2d(pt, a, b, c):
 def _check_mesh_intersection(moved_verts, moved_tris, moved_tree,
                              moved_aabb_min, moved_aabb_max,
                              obs_verts, obs_tris, obs_tree,
-                             obs_aabb_min, obs_aabb_max):
+                             obs_aabb_min, obs_aabb_max,
+                             interference_tolerance=0.0):
     """Check for triangle-level intersection between two mesh AABB trees."""
     if not _aabb_overlap_np(moved_aabb_min, moved_aabb_max,
-                            obs_aabb_min, obs_aabb_max):
+                             obs_aabb_min, obs_aabb_max,
+                             margin=interference_tolerance):
         return False
 
     if moved_tree is None or obs_tree is None:
@@ -293,7 +302,8 @@ def _check_mesh_intersection(moved_verts, moved_tris, moved_tree,
 
     def traverse(node_a, node_b):
         if not _aabb_overlap_np(node_a.min_v, node_a.max_v,
-                                node_b.min_v, node_b.max_v):
+                                 node_b.min_v, node_b.max_v,
+                                 margin=interference_tolerance):
             return False
 
         a_leaf = node_a.is_leaf
@@ -393,9 +403,10 @@ def _has_interference_brep(moved_shape, obstacle_shape, moved_volume):
 
 
 def check_disassembly_path(part_name, part_shape, other_shapes, direction,
-                           max_distance=500.0, steps=20,
+                           max_distance=100.0, steps=20,
                            collision_data=None,
-                           report_all_collisions=False):
+                           report_all_collisions=False,
+                           interference_tolerance=0.0):
     """
     Check if a part can move along a direction without colliding.
 
@@ -411,6 +422,8 @@ def check_disassembly_path(part_name, part_shape, other_shapes, direction,
             across all obstacles at the first collision step (instead of
             stopping at the first one). The result dict will contain
             "collision_names" (list[str]) instead of just "collision_with".
+        interference_tolerance: ignore penetrations up to this distance (mm).
+            Obstacle AABBs are shrunk by this margin during overlap checks.
 
     Returns:
         dict with feasible, max_safe_distance, collision_at_step,
@@ -422,7 +435,8 @@ def check_disassembly_path(part_name, part_shape, other_shapes, direction,
         return _check_path_mesh(
             part_name, part_shape, other_shapes, dir_np,
             max_distance, steps, collision_data,
-            report_all_collisions=report_all_collisions)
+            report_all_collisions=report_all_collisions,
+            interference_tolerance=interference_tolerance)
 
     return _check_path_brep(
         part_shape, other_shapes, dir_np,
@@ -461,7 +475,8 @@ def _safe_coarse_step_size(part_aabb, obstacle_aabbs):
 
 def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
                      max_distance, steps, collision_data,
-                     report_all_collisions=False):
+                     report_all_collisions=False,
+                     interference_tolerance=0.0):
     """Mesh-based collision check with AABB pre-filter and binary search."""
     part_data = collision_data.get(part_name)
 
@@ -526,7 +541,8 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
                     if _check_mesh_intersection(wmoved_verts, part_data.triangles,
                                                 wmoved_tree, wmoved_aabb_min, wmoved_aabb_max,
                                                 obs_v, obs_t, obs_tree,
-                                                obs_amin, obs_amax):
+                                                obs_amin, obs_amax,
+                                                interference_tolerance=interference_tolerance):
                         wht = True
                         if collision_name is None:
                             collision_name = other_name
@@ -579,7 +595,8 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
                     if _check_mesh_intersection(moved_verts, part_data.triangles,
                                                 moved_tree, moved_aabb_min, moved_aabb_max,
                                                 obs_v, obs_t, obs_tree,
-                                                obs_amin, obs_amax):
+                                                obs_amin, obs_amax,
+                                                interference_tolerance=interference_tolerance):
                         hit = True
                         break
                 else:
@@ -622,7 +639,8 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
                 if _check_mesh_intersection(moved_verts, part_data.triangles,
                                             moved_tree, moved_aabb_min, moved_aabb_max,
                                             obs_v, obs_t, obs_tree,
-                                            obs_amin, obs_amax):
+                                            obs_amin, obs_amax,
+                                            interference_tolerance=interference_tolerance):
                     hit_this = True
             else:
                 with OCC_BREP_LOCK:
@@ -676,7 +694,8 @@ def _check_path_mesh(part_name, part_shape, other_shapes, dir_np,
                 if _check_mesh_intersection(moved_verts, part_data.triangles,
                                             moved_tree, moved_aabb_min, moved_aabb_max,
                                             obs_v, obs_t, obs_tree,
-                                            obs_amin, obs_amax):
+                                            obs_amin, obs_amax,
+                                            interference_tolerance=interference_tolerance):
                     hit = True
                     break
             else:
@@ -759,8 +778,9 @@ def _check_path_brep(part_shape, other_shapes, direction,
 
 
 def find_best_feasible_direction(part_name, part_shape, obstacle_shapes,
-                                  preferred_dir, max_distance=500.0,
-                                  collision_data=None):
+                                  preferred_dir, max_distance=100.0,
+                                  collision_data=None,
+                                  interference_tolerance=0.0):
     """
     Search for a feasible disassembly direction for a part.
 
@@ -799,7 +819,8 @@ def find_best_feasible_direction(part_name, part_shape, obstacle_shapes,
             future = ex.submit(
                 check_disassembly_path,
                 part_name, part_shape, obstacle_shapes, direction,
-                max_distance, 20, collision_data)
+                max_distance, 20, collision_data,
+                interference_tolerance=interference_tolerance)
             futures[future] = direction
 
         for future in as_completed(futures):
@@ -844,8 +865,9 @@ def find_best_feasible_direction(part_name, part_shape, obstacle_shapes,
 
 
 def find_all_blockers(part_name, part_shape, obstacle_shapes,
-                      preferred_dir, max_distance=500.0,
-                      collision_data=None, max_directions=None):
+                      preferred_dir, max_distance=100.0,
+                      collision_data=None, max_directions=None,
+                      interference_tolerance=0.0):
     """
     Search candidate directions and collect every blocking part.
 
@@ -899,7 +921,8 @@ def find_all_blockers(part_name, part_shape, obstacle_shapes,
             future = ex.submit(
                 check_disassembly_path,
                 part_name, part_shape, obstacle_shapes, direction,
-                max_distance, 20, collision_data)
+                max_distance, 20, collision_data,
+                interference_tolerance=interference_tolerance)
             futures[future] = direction
 
         for future in as_completed(futures):
@@ -1027,7 +1050,7 @@ def _collect_leaf_descendants(sa_name, sub_assemblies, part_map, result_set,
 
 def filter_obstacles_by_compound_bbox(part_name, part_shape, remaining_names,
                                       part_map, sub_assemblies, collision_data,
-                                      max_distance=500.0, sa_bbox_cache=None):
+                                      max_distance=100.0, sa_bbox_cache=None):
     """Filter obstacles using Compound-level Bnd_Box to exclude far-away groups.
 
     For each sub-assembly, merge AABBs of all descendant leaf parts into a
@@ -1142,7 +1165,7 @@ def precompute_compound_bbox_cache(sub_assemblies, part_map, collision_data):
 
 
 def check_obstacle_set(part_shape, obstacle_set, direction,
-                       max_distance=500.0, steps=20):
+                       max_distance=100.0, steps=20):
     """Simple interference check: is there any obstacle in the path?"""
     others = [(str(i), s) for i, s in enumerate(obstacle_set)]
     result = check_disassembly_path("part", part_shape, others, direction,

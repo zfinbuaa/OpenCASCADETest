@@ -48,6 +48,8 @@ export class SceneManager {
     this._sceneCenter = new THREE.Vector3(0, 0, 0);
     this._sceneRadius = 1000;
 
+    this._onRender = options.onRender || null;
+
     this._setupLights();
 
     this._onResize = this._handleResize.bind(this);
@@ -85,6 +87,7 @@ export class SceneManager {
     this._animFrame = requestAnimationFrame(this._animate);
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
+    if (this._onRender) this._onRender();
   }
 
   resetCamera() {

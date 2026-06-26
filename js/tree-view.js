@@ -181,7 +181,11 @@ export class TreeView {
       }
       if (e.target.tagName === 'INPUT') return;
       if (e.target.classList.contains('eye-icon')) return;
-      this._select(row, node);
+      if (e.ctrlKey || e.metaKey) {
+        this._toggleCheck(node);
+      } else {
+        this._select(row, node);
+      }
     });
 
     parentEl.appendChild(row);
@@ -562,5 +566,96 @@ export class TreeView {
         this._collectAllPartIds(child, outSet);
       }
     }
+  }
+
+  // ── Compound (编组) section ──────────────────────────
+
+  _ensureCompoundSection() {
+    let sec = document.getElementById('compound-section');
+    if (!sec) {
+      sec = document.createElement('div');
+      sec.id = 'compound-section';
+      sec.style.borderTop = '2px solid #1e90ff';
+      sec.style.marginTop = '6px';
+      sec.style.paddingTop = '4px';
+      const title = document.createElement('div');
+      title.className = 'section-title';
+      title.textContent = '编组 (Compounds)';
+      sec.appendChild(title);
+      const list = document.createElement('div');
+      list.id = 'compound-list';
+      sec.appendChild(list);
+      this.container.appendChild(sec);
+    }
+    return sec;
+  }
+
+  addCompound(name, members, color) {
+    this._ensureCompoundSection();
+    const list = document.getElementById('compound-list');
+    const existing = list.querySelector(`[data-compound="${name}"]`);
+    if (existing) existing.remove();
+
+    const row = document.createElement('div');
+    row.className = 'tree-node compound-node';
+    row.style.paddingLeft = '12px';
+    row.dataset.compound = name;
+    row.dataset.members = JSON.stringify(members);
+    row.title = `双击定位 | 成员: ${members.join(', ')}`;
+
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = color || '#1e90ff';
+    swatch.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (this.callbacks.onCompoundColorChange) {
+        this.callbacks.onCompoundColorChange(name, row);
+      }
+    });
+    row.appendChild(swatch);
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'name';
+    nameSpan.textContent = name;
+    nameSpan.style.fontWeight = '600';
+    row.appendChild(nameSpan);
+
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = members.length + ' 件';
+    row.appendChild(badge);
+
+    row.addEventListener('click', () => {
+      document.querySelectorAll('.tree-node.selected').forEach(
+        e => e.classList.remove('selected'));
+      row.classList.add('selected');
+      if (this.callbacks.onCompoundSelect) {
+        this.callbacks.onCompoundSelect(name, members);
+      }
+    });
+
+    row.addEventListener('dblclick', () => {
+      if (this.callbacks.onCompoundFocus) {
+        this.callbacks.onCompoundFocus(name, members);
+      }
+    });
+
+    list.appendChild(row);
+  }
+
+  removeCompound(name) {
+    const list = document.getElementById('compound-list');
+    if (!list) return;
+    const row = list.querySelector(`[data-compound="${name}"]`);
+    if (row) row.remove();
+    if (list.children.length === 0) {
+      const sec = document.getElementById('compound-section');
+      if (sec) sec.remove();
+    }
+  }
+
+  clearCompounds() {
+    const sec = document.getElementById('compound-section');
+    if (sec) sec.remove();
   }
 }

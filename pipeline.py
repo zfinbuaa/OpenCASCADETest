@@ -59,7 +59,7 @@ def main():
     parser.add_argument("input", help="STEP (.stp) 或 assembly.json (配合 --validate)")
     parser.add_argument("--output-dir", default="./output")
     parser.add_argument("--mesh-deflection", type=float, default=1.0)
-    parser.add_argument("--explosion-distance", type=float, default=500.0)
+    parser.add_argument("--explosion-distance", type=float, default=100.0)
     parser.add_argument("--skip-collision", action="store_true")
     parser.add_argument("--preview", action="store_true",
                         help="仅导入 STP → 网格化 → 导出 glb + JSON (跳过分析)")
@@ -80,9 +80,26 @@ def main():
     parser.add_argument("--center-part", default=None,
                         help="爆炸视图模式 (--skip-collision)：指定中心固定零件名 "
                              "(leaf 或 sub-assembly 节点)。未指定则使用几何重心。")
+    parser.add_argument("--compounds", default=None,
+                        help="JSON encoded list of compound definitions: "
+                             '[{"name":"C1","members":["p1","p2"]},...]')
+    parser.add_argument("--interference-tolerance", type=float, default=0.0,
+                        help="Ignore penetrations up to this distance (mm) "
+                             "during collision check. Useful for assemblies "
+                             "with small geometric interferences.")
+    parser.add_argument("--clean", action="store_true",
+                        help="数模清洗模式：按 BOM J列匹配 + 干涉检查 + 去重清洗模型")
+    parser.add_argument("--clean-bom", default=None,
+                        help="清洗模式下的 XLSX 文件路径")
+    parser.add_argument("--export-step", action="store_true",
+                        help="清洗模式下同时导出清洗后的 STEP 文件")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # ── Clean mode: model cleaning ──
+    if args.clean:
+        return _run_clean(args)
 
     # ── BOM mode: multi-file loading from Excel BOM ──
     if args.bom:
@@ -155,6 +172,21 @@ def main():
                                      linear_deflection=args.mesh_deflection)
     log("  {} glb files written ({:.1f}s)".format(len(parts), time.time() - t0))
 
+    if args.compounds:
+        from pipeline.compound_utils import apply_compounds
+        try:
+            compounds_def = json.loads(args.compounds)
+        except Exception:
+            log("  WARNING: failed to parse --compounds JSON, ignoring")
+            compounds_def = []
+        if compounds_def:
+            log("  Applying {} compound definitions...".format(len(compounds_def)))
+            parts, compound_info = apply_compounds(
+                parts, compounds_def, args.output_dir,
+                linear_deflection=args.mesh_deflection)
+            log("  {} parts after compounding ({} compounds)".format(
+                len(parts), len(compound_info)))
+
     # Pre-compute collision mesh data (shared for contact filter + DAG)
     from pipeline.collision_check import prepare_collision_data
     from pipeline.direction_calc import _compute_assembly_centroid, _compute_centroids
@@ -201,7 +233,8 @@ def main():
             max_distance=args.explosion_distance,
             assembly_centroid=assembly_centroid,
             sub_assemblies=sub_assemblies,
-            optimize_direction=not args.no_optimize_dir)
+            optimize_direction=not args.no_optimize_dir,
+            interference_tolerance=args.interference_tolerance)
         log("  {} stages in dependency chain ({:.1f}s)".format(
             len(stages), time.time() - t0))
 
@@ -791,7 +824,8 @@ def _run_bom_full(args):
             max_distance=args.explosion_distance,
             assembly_centroid=assembly_centroid,
             sub_assemblies=sub_assemblies,
-            optimize_direction=not args.no_optimize_dir)
+            optimize_direction=not args.no_optimize_dir,
+            interference_tolerance=args.interference_tolerance)
         log("  {} stages in dependency chain ({:.1f}s)".format(
             len(stages), time.time() - t0))
 
@@ -934,6 +968,23 @@ def _run_bom_full(args):
     log("Done in {:.1f}s. Output: {}".format(
         time.time() - t_total, args.output_dir))
     return 0
+
+
+def _run_clean(args):
+    """数模清洗模式: STP + XLSX → 清洗后 glb + assembly.json"""
+    if not args.clean_bom:
+        log("ERROR: --clean 模式需要同时指定 --clean-bom <xlsx文件>")
+        return 1
+
+    from pipeline.model_cleaner import clean_model
+
+    return clean_model(
+        stp_path=args.input,
+        xlsx_path=args.clean_bom,
+        output_dir=args.output_dir,
+        export_step=args.export_step,
+        log_fn=log,
+    )
 
 
 def _merge_parts_to_compound(parts_list):

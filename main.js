@@ -96,6 +96,10 @@ function buildMenu() {
           click: () => runBomPreviewPipeline(),
         },
         {
+          label: '数模清洗 (STP + BOM)',
+          click: () => runCleanPipeline(),
+        },
+        {
           label: '加载已处理的 JSON 文件',
           click: () => safeSend('menu-load-assembly'),
         },
@@ -334,7 +338,7 @@ ipcMain.handle('run-bom-full-pipeline-cached', async (_event, bomPath, modelsDir
 
 // ── Pipeline scoped to a sub-assembly node ─────────────────
 
-ipcMain.handle('run-pipeline-for-node-cached', async (_event, stpPath, rootNode) => {
+ipcMain.handle('run-pipeline-for-node-cached', async (_event, stpPath, rootNode, compoundsJson) => {
   if (typeof stpPath !== 'string' || !fs.existsSync(stpPath)) return;
   const ext = path.extname(stpPath).toLowerCase();
   if (ext !== '.stp' && ext !== '.step') {
@@ -358,6 +362,10 @@ ipcMain.handle('run-pipeline-for-node-cached', async (_event, stpPath, rootNode)
     '--root-node', rootNode,
   ];
 
+  if (compoundsJson && compoundsJson !== '[]' && compoundsJson !== '') {
+    args.push('--compounds', compoundsJson);
+  }
+
   safeSend('pipeline-progress', '=== 生成拆卸方案 (节点: ' + rootNode + ') ===');
   safeSend('pipeline-mode', 'full');
   safeSend('pipeline-started', stpPath);
@@ -378,7 +386,7 @@ ipcMain.handle('run-pipeline-for-node-cached', async (_event, stpPath, rootNode)
 
 // ── Single-file STP Pipeline: dependency chain for a target part ─
 
-ipcMain.handle('run-single-pipeline-chain', async (_event, stpPath, targetPart) => {
+ipcMain.handle('run-single-pipeline-chain', async (_event, stpPath, targetPart, compoundsJson) => {
   if (typeof stpPath !== 'string' || !fs.existsSync(stpPath)) {
     safeSend('pipeline-progress', 'ERROR: STP file not found: ' + stpPath);
     return;
@@ -404,6 +412,10 @@ ipcMain.handle('run-single-pipeline-chain', async (_event, stpPath, targetPart) 
     '--output-dir', outputDir,
     '--target-part', targetPart,
   ];
+
+  if (compoundsJson && compoundsJson !== '[]' && compoundsJson !== '') {
+    args.push('--compounds', compoundsJson);
+  }
 
   safeSend('pipeline-progress', '=== 依赖链分析 (目标: ' + targetPart + ') ===');
   safeSend('pipeline-mode', 'chain');
@@ -562,6 +574,12 @@ ipcMain.handle('run-bom-explosion-pipeline-cached', async (_event, bomPath, mode
       safeSend('pipeline-error', code);
     }
   });
+});
+
+// ── Pipeline: Model Cleaning (STP + XLSX → clean assembly) ──
+
+ipcMain.handle('run-clean-pipeline', async () => {
+  await runCleanPipeline();
 });
 
 // ── Pipeline: Preview STP (mesh + load, no analysis) ────
@@ -955,6 +973,61 @@ async function runBomFullPipelineCached(bomPath, modelsDir, targetPart) {
       safeSend('pipeline-complete', jsonPath);
     } else {
       safeSend('pipeline-progress', 'BOM管线失败，退出码: ' + code);
+      safeSend('pipeline-error', code);
+    }
+  });
+}
+
+// ── Pipeline: Model Cleaning (STP + XLSX → clean assembly) ──
+
+async function runCleanPipeline() {
+  const stpResult = await dialog.showOpenDialog(mainWindow, {
+    title: '选择 STP 数模文件',
+    filters: [{ name: 'STEP 模型', extensions: ['stp', 'step'] }],
+    properties: ['openFile'],
+  });
+  if (stpResult.canceled || !stpResult.filePaths[0]) return;
+
+  const stpPath = stpResult.filePaths[0];
+
+  const xlsxResult = await dialog.showOpenDialog(mainWindow, {
+    title: '选择 BOM 表格 (.xlsx)',
+    filters: [{ name: 'Excel 表格', extensions: ['xlsx'] }],
+    properties: ['openFile'],
+  });
+  if (xlsxResult.canceled || !xlsxResult.filePaths[0]) return;
+
+  const xlsxPath = xlsxResult.filePaths[0];
+
+  const outputDir = _tsOutputDir(stpPath, 'clean');
+  registerAllowedRoot(outputDir);
+  registerAllowedRoot(path.dirname(stpPath));
+  registerAllowedRoot(path.dirname(xlsxPath));
+  const { exePath, baseArgs } = findPipelineExe();
+
+  const args = [
+    ...baseArgs,
+    stpPath,
+    '--output-dir', outputDir,
+    '--clean',
+    '--clean-bom', xlsxPath,
+  ];
+
+  safeSend('pipeline-progress', '=== 数模清洗 ===');
+  safeSend('pipeline-progress', 'STP: ' + stpPath);
+  safeSend('pipeline-progress', 'BOM: ' + xlsxPath);
+  safeSend('pipeline-mode', 'clean');
+  safeSend('pipeline-started', stpPath);
+
+  const env = buildPipelineEnv();
+  const proc = spawnPipeline(exePath, args, env);
+
+  proc.on('close', (code) => {
+    if (code === 0) {
+      const jsonPath = path.join(outputDir, 'assembly.json');
+      safeSend('pipeline-complete', jsonPath);
+    } else {
+      safeSend('pipeline-progress', '数模清洗失败，退出码: ' + code);
       safeSend('pipeline-error', code);
     }
   });

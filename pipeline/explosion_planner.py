@@ -175,7 +175,7 @@ def _pick_max_separation_dir(current_dir, escape_vec, candidates):
 def build_explosion_plan(parts, directions, collision_data,
                          sub_assemblies=None,
                          center_part=None,
-                         max_distance=500.0,
+                         max_distance=100.0,
                          base_explosion_distance=150.0,
                          n_stage_buckets=4,
                          max_correction_iters=3,

@@ -10,7 +10,7 @@ from .collision_check import check_disassembly_path
 
 
 def find_feasible_direction(part_name, part_shape, other_shapes, preferred_dir,
-                            max_distance=500.0, steps=20,
+                            max_distance=100.0, steps=20,
                             min_safe_fraction=0.5,
                             collision_data=None):
     """
@@ -97,7 +97,7 @@ def _generate_candidates(preferred_dir):
 
 
 def compute_all_feasible_directions(parts, contacts, directions,
-                                    max_distance=500.0,
+                                    max_distance=100.0,
                                     collision_data=None):
     """
     For each part, find a feasible disassembly direction.

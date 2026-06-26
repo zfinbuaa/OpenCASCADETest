@@ -35,3 +35,6 @@ from .path_validator import validate_disassembly_plan, generate_report
 
 # Phase 3: Explosion view (geometric-only, no swept collision)
 from .explosion_planner import build_explosion_plan
+
+# Phase 4: Model cleaning
+from .model_cleaner import clean_model

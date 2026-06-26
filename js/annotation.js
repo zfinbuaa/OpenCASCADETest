@@ -33,24 +33,18 @@ export class Annotation {
     this._hiddenPartIds = ids instanceof Set ? ids : new Set(ids || []);
   }
 
-  setParts(parts, checkedNodes = null) {
-    if (checkedNodes && checkedNodes.length > 0) {
-      this.annotations = checkedNodes.map((node, i) => ({
-        partId: node.nodeId,
-        partIds: node.partIds,
-        partName: node.nodeId,
+  setParts(parts, checkedNodes = null, compounds = null) {
+    if (compounds && compounds.length > 0) {
+      this.annotations = compounds.map((c, i) => ({
+        partId: c.name,
+        partIds: new Set(c.members),
+        partName: c.name,
         worldPos: new THREE.Vector3(),
         index: i,
       }));
-    } else {
-      this.annotations = parts.map((p, i) => ({
-        partId: p.id || p.name,
-        partIds: new Set([p.id || p.name]),
-        partName: p.name || p.id,
-        worldPos: new THREE.Vector3(),
-        index: i,
-      }));
+      return;
     }
+    this.annotations = [];
   }
 
   updatePositions() {
