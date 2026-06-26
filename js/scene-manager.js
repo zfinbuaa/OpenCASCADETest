@@ -91,7 +91,7 @@ export class SceneManager {
   }
 
   resetCamera() {
-    this._viewFromDirection(1, 0.7, 1);
+    this._viewFromDirection(1, 1, 1);
   }
 
   focusOn(center, diagonal = 2000) {
@@ -100,7 +100,7 @@ export class SceneManager {
     this.controls.target.copy(center);
     const fov = this.camera.fov * Math.PI / 180;
     const dist = this._sceneRadius / Math.tan(fov / 2) * 0.65;
-    const dir = new THREE.Vector3(1, 0.7, 1).normalize();
+    const dir = new THREE.Vector3(1, 1, 1).normalize();
     this.camera.position.copy(center).add(dir.multiplyScalar(dist));
     this.controls.update();
   }
@@ -114,10 +114,10 @@ export class SceneManager {
     this.controls.update();
   }
 
-  viewLeftRear()   { this._viewFromDirection(-1, 0.7, -1); }
-  viewLeftFront()  { this._viewFromDirection(-1, 0.7, 1); }
-  viewRightRear()  { this._viewFromDirection(1, 0.7, -1); }
-  viewRightFront() { this._viewFromDirection(1, 0.7, 1); }
+  viewLeftRear()   { this._viewFromDirection(-1, 1, -1); }
+  viewLeftFront()  { this._viewFromDirection(-1, 1, 1); }
+  viewRightRear()  { this._viewFromDirection(1, 1, -1); }
+  viewRightFront() { this._viewFromDirection(1, 1, 1); }
   viewTop()        { this._viewFromDirection(0, 1, 0.001); }
   viewBottom()     { this._viewFromDirection(0, -1, 0.001); }
 

@@ -145,16 +145,26 @@ export class Annotation {
       ctx.fillText(String(number), circleX, cy);
     }
 
+    let prevLeftSY = -999;
     for (let i = 0; i < leftCount; i++) {
       const { sx, sy, ann } = screenPoints[i];
-      const cy = topPad + (availH / (leftCount + 1)) * (i + 1);
+      let cy = topPad + (availH / (leftCount + 1)) * (i + 1);
+      if (i > 0 && Math.abs(sy - prevLeftSY) < 40) {
+        cy += 25;
+      }
+      prevLeftSY = sy;
       const number = ann.index + 1;
       drawOne(ctx, leftX, sx, sy, cy, number);
     }
 
+    let prevRightSY = -999;
     for (let i = 0; i < rightCount; i++) {
       const { sx, sy, ann } = screenPoints[leftCount + i];
-      const cy = topPad + (availH / (rightCount + 1)) * (i + 1);
+      let cy = topPad + (availH / (rightCount + 1)) * (i + 1);
+      if (i > 0 && Math.abs(sy - prevRightSY) < 40) {
+        cy += 25;
+      }
+      prevRightSY = sy;
       const number = ann.index + 1;
       drawOne(ctx, rightX, sx, sy, cy, number);
     }

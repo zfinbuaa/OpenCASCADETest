@@ -125,6 +125,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Menu: Export > Batch capture */
   onMenuBatchCapture: (callback) => exclusiveOn('menu-batch-capture', callback),
 
+  /** Menu: Help > About */
+  onMenuShowHelp: (callback) => exclusiveOn('menu-show-help', callback),
+
   // ── Cleanup ───────────────────────────────────────────
 
   removeAllListeners: (channel) => {

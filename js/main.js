@@ -64,6 +64,7 @@ const tabs = [
   { mode: 'serviceability', tree: null },
   { mode: 'manual', tree: null },
   { mode: 'clean', tree: null },
+  { mode: 'help', tree: null },
 ];
 
 const sharedExplo = new ExplosionView(sm.scene, sm.camera, sm.renderer.domElement, sm.controls);
@@ -85,7 +86,7 @@ function switchTab(idx) {
   activeTab = idx;
   tabBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
 
-  const titles = ['位置图', '爆炸图', '拆装方案（可维修性）', '拆装方案（维修手册）', '数模清洗'];
+  const titles = ['位置图', '爆炸图', '拆装方案（可维修性）', '拆装方案（维修手册）', '数模清洗', '帮助'];
   panelHeader.textContent = titles[idx];
 
   renderPanel(idx);
@@ -101,6 +102,7 @@ function renderPanel(idx) {
     case 2: renderServiceabilityPanel(); break;
     case 3: renderManualPanel(); break;
     case 4: renderCleanPanel(); break;
+    case 5: renderHelpPanel(); break;
   }
 }
 
@@ -206,6 +208,12 @@ function renderPositionPanel() {
   h += '<button class="btn btn-outline" id="btn-annot-hide">清除标注</button>';
   h += '<button class="btn btn-outline" id="btn-export">导出 PNG</button>';
   h += '</div>';
+  h += '<div class="section-title">标注管理</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-create-compound">勾选部件 → 生成标注</button>';
+  h += '<button class="btn btn-outline" id="btn-clear-compounds">清空标注</button>';
+  h += '</div>';
+  h += '<div id="compound-preview" style="margin:4px 10px;font-size:10px;color:#889;min-height:18px;">未创建标注</div>';
   panelBody.innerHTML = h;
   bindPositionPanel();
 }
@@ -336,6 +344,73 @@ function renderCleanPanel() {
   h += '<div class="btn-group"><button class="btn btn-outline" id="btn-export-clean">导出 PNG</button></div>';
   panelBody.innerHTML = h;
   bindCleanPanel();
+}
+
+function renderHelpPanel() {
+  panelBody.innerHTML = `
+    <div class="section-title">帮助</div>
+    <div class="help-content" style="padding:8px 16px;font-size:12px;line-height:1.7;overflow-y:auto;max-height:calc(100vh - 160px);">
+      <h3 style="color:#7ec8e3;margin:12px 0 6px;">系统架构</h3>
+      <p>基于 OpenCASCADE (OCCT) + Three.js + Electron 的三维装配体自动拆装方案生成与可视化系统。</p>
+      <p>输入 STEP (.stp) 格式的三维装配体模型，自动输出拆装顺序、爆炸方向、碰撞验证报告，并在桌面前端以交互式爆炸图展示。</p>
+      
+      <h3 style="color:#7ec8e3;margin:12px 0 6px;">功能页面</h3>
+      
+      <details open><summary style="cursor:pointer;color:#7ec8e3;font-weight:600;">位置图</summary>
+        <p style="padding-left:12px;">以原始装配位置查看全部零件。左侧结构树点击零件可高亮聚焦。右侧面板可切换车壳叠加显示。</p>
+        <p style="padding-left:12px;">操作: 菜单 文件 → 加载单个 STEP 文件 (Ctrl+O) 或 通过表格加载多个 STEP 文件 (Ctrl+B)。</p>
+      </details>
+
+      <details open><summary style="cursor:pointer;color:#7ec8e3;font-weight:600;">爆炸图</summary>
+        <p style="padding-left:12px;">查看零件的爆炸分解视图，支持手动调整爆炸程度和位置。通过右侧滑块控制爆炸程度(0%-100%)，或点击"一键爆炸"立即展开。</p>
+        <p style="padding-left:12px;">支持 TransformControls 手动拖拽调整单个零件位置，可选显示推力线标注爆炸方向。</p>
+      </details>
+
+      <details open><summary style="cursor:pointer;color:#7ec8e3;font-weight:600;">拆装方案（可维修性）</summary>
+        <p style="padding-left:12px;">为整个装配体生成完整的分阶段拆卸序列。菜单 管线 → 生成拆装方案 (Ctrl+G) 触发8步分析管线。</p>
+        <p style="padding-left:12px;">产出: 分阶段拆卸顺序列表 + 步骤动画演示。编组管理: 勾选零件后可根据标注生成编组。</p>
+      </details>
+
+      <details open><summary style="cursor:pointer;color:#7ec8e3;font-weight:600;">拆装方案（维修手册）</summary>
+        <p style="padding-left:12px;">针对指定目标零件，计算"要拆这个零件必须先拆哪些"的完整依赖链条。</p>
+        <p style="padding-left:12px;">算法: 从26个候选方向中选出最优8个 → 并行碰撞检测 → 光束搜索(K=4)递归模拟总拆卸成本 → 选择最优方向。</p>
+        <p style="padding-left:12px;">产出: 依赖链概要 + 方向对比表 + 逐阶段拆卸顺序 + AI最佳拆装路径动画。</p>
+      </details>
+
+      <details open><summary style="cursor:pointer;color:#7ec8e3;font-weight:600;">数模清洗</summary>
+        <p style="padding-left:12px;">按BOM表格J列匹配零件 + 干涉检查 + 去重清洗模型。菜单 文件 → 数模清洗 (STP + BOM)。</p>
+      </details>
+
+      <h3 style="color:#7ec8e3;margin:12px 0 6px;">BOM多文件加载</h3>
+      <p>当装配体零件分散在多个STEP文件中时，通过Excel表格统一加载。H列为零件名称，J列为零件编码。</p>
+
+      <h3 style="color:#7ec8e3;margin:12px 0 6px;">碰撞检测</h3>
+      <p>零件沿拆卸方向扫掠100mm(默认值)。若能无障碍移动100mm则视为"可以拆除"。可通过 --explosion-distance 参数调整。</p>
+
+      <h3 style="color:#7ec8e3;margin:12px 0 6px;">安装与运行</h3>
+      <p>环境: Node.js ≥ 16, Python ≥ 3.10 + conda, pythonocc-core ≥ 7.8</p>
+      <p>开发运行: npm start | 构建: build_portable.bat</p>
+
+      <h3 style="color:#7ec8e3;margin:12px 0 6px;">命令行管线</h3>
+      <pre style="background:#0a0a1a;padding:8px;border-radius:3px;font-size:10px;overflow-x:auto;">
+python pipeline.py input.stp --preview --output-dir ./output/
+python pipeline.py input.stp --output-dir ./output/
+python pipeline.py input.stp --output-dir ./output/ --skip-collision
+python pipeline.py input.stp --output-dir ./output/ --explosion-distance 200
+python pipeline.py assembly.json --validate --output-dir ./output/</pre>
+
+      <h3 style="color:#7ec8e3;margin:12px 0 6px;">输出格式</h3>
+      <p>assembly.json + parts/*.glb + report.txt</p>
+      <p>零件字段: id, name, glbFile, isFastener, disassemblyStage, direction, distanceMultiplier, directionConfidence, color</p>
+
+      <h3 style="color:#7ec8e3;margin:12px 0 6px;">技术栈</h3>
+      <p>几何内核: OpenCASCADE 7.9 | 3D渲染: Three.js 0.157 | 桌面框架: Electron | 打包: PyInstaller + electron-builder</p>
+      <p style="margin-top:16px;color:#889;">版本 2.0 | License: LGPL-3.0</p>
+    </div>`;
+  _bindHelpPanel();
+}
+
+function _bindHelpPanel() {
 }
 
 function bindCleanPanel() {
@@ -545,6 +620,9 @@ function bindPositionPanel() {
   document.getElementById('btn-annot-hide')?.addEventListener('click', () => annot.clear());
   document.getElementById('btn-export')?.addEventListener('click', _exportAnnotated);
   _bindChainDemoButtons();
+  document.getElementById('btn-create-compound')?.addEventListener('click', _createCompoundFromChecked);
+  document.getElementById('btn-clear-compounds')?.addEventListener('click', _clearAllCompounds);
+  _updateCompoundPreview();
   buildActiveTree();
   _renderBomList();
 }
@@ -979,6 +1057,8 @@ function buildActiveTree() {
   t.tree.build(shared.hierarchy, shared.assembly.parts, shared.assembly.stages);
   t.tree.setFixedPartIds(shared.fixedPartIds);
   t.tree.setHiddenPartIds(shared.hiddenPartIds);
+  _restoreCompoundsToTree();
+  _updateCompoundPreview();
 }
 
 function _rebuildExplosionGroups() {
@@ -1408,6 +1488,7 @@ if (window.electronAPI) {
   window.electronAPI.onMenuViewRightFront(() => sm.viewRightFront());
   window.electronAPI.onMenuViewTop(() => sm.viewTop());
   window.electronAPI.onMenuViewBottom(() => sm.viewBottom());
+  window.electronAPI.onMenuShowHelp(() => switchTab(5));
 }
 
 // ── Startup ──────────────────────────────────────────────

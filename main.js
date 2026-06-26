@@ -181,15 +181,7 @@ function buildMenu() {
       submenu: [
         {
           label: '关于',
-          click: () => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              dialog.showMessageBox(mainWindow, {
-                type: 'info',
-                title: '关于',
-                message: '数模自动拆装工具\n基于 OpenCASCADE + Three.js + Electron\n版本 2.0',
-              }).catch(() => {});
-            }
-          },
+          click: () => safeSend('menu-show-help'),
         },
       ],
     },
