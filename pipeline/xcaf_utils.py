@@ -16,7 +16,7 @@ from OCC.Core.XCAFDoc import (
     XCAFDoc_DocumentTool,
     XCAFDoc_ShapeTool,
 )
-from OCC.Core.TDF import TDF_LabelSequence
+from OCC.Core.TDF import TDF_LabelSequence, TDF_AttributeIterator
 from OCC.Core.TDataStd import TDataStd_Name
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.BRepGProp import brepgprop
@@ -34,50 +34,33 @@ logger = logging.getLogger(__name__)
 def get_shape_name(label, shape_tool):
     """Get the name of a shape label using TDataStd_Name API."""
     try:
-        name_attr = TDataStd_Name()
-        if label.FindAttribute(TDataStd_Name.GetID(), name_attr):
-            try:
-                from OCC.Core.TCollection import TCollection_AsciiString
-                ext_str = name_attr.Get()
-                ascii_str = TCollection_AsciiString(ext_str, "UTF8")
-                s = ascii_str.ToCString()
-                if s:
-                    return s
-            except (ImportError, Exception):
-                pass
-            try:
-                ext_str = name_attr.Get()
-                length = ext_str.Length()
-                if length > 0:
-                    chars = []
-                    for i in range(1, length + 1):
-                        chars.append(chr(ext_str.Value(i)))
-                    s = ''.join(chars)
-                    if s:
-                        return s
-            except Exception:
-                pass
-            try:
-                dump_output = name_attr.Dump()
-                if isinstance(dump_output, tuple) and len(dump_output) >= 2:
-                    s = str(dump_output[1])
-                    if "Name=|" in s:
-                        try:
-                            start = s.index("Name=|") + 6
-                            end = s.index("|", start)
-                            return s[start:end]
-                        except ValueError:
-                            pass
-            except Exception:
-                pass
+        guid = TDataStd_Name.GetID()
+        if label.IsAttribute(guid):
+            it = TDF_AttributeIterator(label)
+            while it.More():
+                attr = it.Value()
+                if attr.ID() == guid:
+                    try:
+                        dump_output = attr.Dump()
+                        if isinstance(dump_output, tuple) and len(dump_output) >= 2:
+                            s = str(dump_output[1])
+                            if "Name=|" in s:
+                                start = s.index("Name=|") + 6
+                                end = s.index("|", start)
+                                name = s[start:end]
+                                if name:
+                                    return name
+                    except Exception:
+                        pass
+                    break
+                it.Next()
     except Exception:
         pass
     return "Part_{}".format(label.Tag())
 
-
 def set_shape_name(label, name):
     """Set name on a TDF label using TDataStd_Name (compatible with 7.8)."""
-    TDataStd_Name.Set(label, name)
+    TDataStd_Name.Set(label, str(name))
 
 
 def loc_to_matrix(loc):

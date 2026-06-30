@@ -1,0 +1,22 @@
+﻿{
+  "schema_version": 2,
+  "active_work_id": "ui-ux-fixes",
+  "works": {
+    "code-audit-fix": {
+      "work_id": "code-audit-fix",
+      "active_plan": ".omo/plans/code-audit-fix.md",
+      "plan_name": "code-audit-fix",
+      "session_ids": ["codex:ses_0fe15e2f1139vPPl0Ox9sKUoiC"],
+      "status": "active",
+      "worktree_path": null
+    },
+    "ui-ux-fixes": {
+      "work_id": "ui-ux-fixes",
+      "active_plan": ".omo/plans/ui-ux-fixes.md",
+      "plan_name": "ui-ux-fixes",
+      "session_ids": ["codex:ses_0fe15e2f1139vPPl0Ox9sKUoiC"],
+      "status": "active",
+      "worktree_path": null
+    }
+  }
+}

@@ -7,7 +7,7 @@ Uses pre-computed mesh collision data for performance.
 """
 
 
-def validate_disassembly_plan(parts, stages, directions, max_distance=500.0,
+def validate_disassembly_plan(parts, stages, directions, max_distance=100.0,
                               progress_callback=None, collision_data=None):
     """
     Validate the entire disassembly plan stage-by-stage.

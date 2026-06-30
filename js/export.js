@@ -100,4 +100,51 @@ export class ExportManager {
     link.click();
     document.body.removeChild(link);
   }
+
+  _downloadText(content, filename) {
+    const blob = new Blob([content], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.download = filename;
+    link.href = url;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
+  exportSVG(canvasDataUrl, annotations, viewportW, viewportH, filename = 'export.svg') {
+    const lines = [];
+    lines.push('<?xml version="1.0" encoding="utf-8"?>');
+    lines.push('<svg version="1.1" xmlns="http://www.w3.org/2000/svg"');
+    lines.push('     width="' + viewportW + '" height="' + viewportH + '"');
+    lines.push('     viewBox="0 0 ' + viewportW + ' ' + viewportH + '">');
+    lines.push('');
+    lines.push('  <g id="background">');
+    lines.push('    <image href="' + canvasDataUrl + '" x="0" y="0" width="' + viewportW + '" height="' + viewportH + '" />');
+    lines.push('  </g>');
+    lines.push('');
+    lines.push('  <g id="annotations">');
+    if (annotations && annotations.length > 0) {
+      for (let i = 0; i < annotations.length; i++) {
+        const a = annotations[i];
+        const cx = a.circleX || a.sx;
+        const cy = a.circleY || a.sy;
+        const tx = a.targetX || a.sx;
+        const ty = a.targetY || a.sy;
+        const num = a.number || (i + 1);
+        const r = 12;
+        lines.push('    <g id="item' + (i + 1) + '">');
+        lines.push('      <line x1="' + cx + '" y1="' + cy + '" x2="' + tx + '" y2="' + ty + '" stroke="#222" stroke-width="1.5" />');
+        lines.push('      <circle cx="' + cx + '" cy="' + cy + '" r="' + (r + 2) + '" fill="#fff" stroke="#000" stroke-width="2" />');
+        lines.push('      <text x="' + cx + '" y="' + cy + '" text-anchor="middle" dominant-baseline="central" font-size="12" font-family="sans-serif" font-weight="bold" fill="#000">' + num + '</text>');
+        lines.push('    </g>');
+      }
+    }
+    lines.push('  </g>');
+    lines.push('</svg>');
+    const svg = lines.join('\n');
+    this._downloadText(svg, filename);
+    return svg;
+  }
 }

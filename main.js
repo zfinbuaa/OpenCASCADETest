@@ -222,7 +222,21 @@ ipcMain.handle('save-screenshot', async (_event, dataUrl) => {
 
   const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
   const buffer = Buffer.from(base64, 'base64');
-  fs.writeFileSync(result.filePath, buffer);
+  try { fs.writeFileSync(result.filePath, buffer); } catch { return false; }
+  return result.filePath;
+});
+
+ipcMain.handle('save-svg', async (_event, svgString) => {
+  if (typeof svgString !== 'string' || !svgString.startsWith('<?xml')) {
+    return false;
+  }
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: '导出 SVG',
+    defaultPath: 'export.svg',
+    filters: [{ name: 'SVG Image', extensions: ['svg'] }],
+  });
+  if (result.canceled || !result.filePath) return false;
+  try { fs.writeFileSync(result.filePath, svgString, 'utf-8'); } catch { return false; }
   return result.filePath;
 });
 

@@ -207,6 +207,7 @@ function renderPositionPanel() {
   h += '<button class="btn btn-outline" id="btn-annot-show">显示标注</button>';
   h += '<button class="btn btn-outline" id="btn-annot-hide">清除标注</button>';
   h += '<button class="btn btn-outline" id="btn-export">导出 PNG</button>';
+  h += '<button class="btn btn-outline" id="btn-export-svg-position">导出 SVG</button>';
   h += '</div>';
   h += '<div class="section-title">标注管理</div>';
   h += '<div class="btn-group">';
@@ -231,10 +232,12 @@ function renderExplosionPanel() {
   h += '<button class="btn btn-outline" id="btn-clear-center">清除中心</button>';
   h += '</div>';
   h += '<div id="center-display" style="margin:4px 12px;font-size:11px;color:#7ec8e3;">未设置 (使用几何重心)</div>';
-  h += '<div class="section-title">生成爆炸</div>';
+  h += '<div class="section-title">标注管理</div>';
   h += '<div class="btn-group">';
-  h += '<button class="btn btn-pri" id="btn-gen-explosion">生成爆炸视图</button>';
+  h += '<button class="btn btn-outline" id="btn-create-compound">勾选部件 → 生成标注</button>';
+  h += '<button class="btn btn-outline" id="btn-clear-compounds">清空标注</button>';
   h += '</div>';
+  h += '<div id="compound-preview" style="margin:4px 10px;font-size:10px;color:#889;min-height:18px;">未创建标注</div>';
   h += '<div class="section-title">爆炸控制</div>';
   h += '<div class="slider-row"><span>距离</span><input type="range" id="slider-dist" min="10" max="2000" value="150" step="5"><span id="val-dist">150</span>mm</div>';
   h += '<div class="btn-group">';
@@ -250,7 +253,9 @@ function renderExplosionPanel() {
   h += '<button class="btn btn-outline" id="btn-annot-show">显示标注</button>';
   h += '<button class="btn btn-outline" id="btn-annot-hide">清除标注</button>';
   h += '<button class="btn btn-outline" id="btn-thrust">推力线</button>';
-  h += '<button class="btn btn-outline" id="btn-export">导出 PNG</button></div>';
+  h += '<button class="btn btn-outline" id="btn-export">导出 PNG</button>';
+  h += '<button class="btn btn-outline" id="btn-export-svg-explosion">导出 SVG</button>';
+  h += '</div>';
   panelBody.innerHTML = h;
   bindExplosionPanel();
 }
@@ -619,6 +624,7 @@ function bindPositionPanel() {
 
   document.getElementById('btn-annot-hide')?.addEventListener('click', () => annot.clear());
   document.getElementById('btn-export')?.addEventListener('click', _exportAnnotated);
+  document.getElementById('btn-export-svg-position')?.addEventListener('click', _exportSVG);
   _bindChainDemoButtons();
   document.getElementById('btn-create-compound')?.addEventListener('click', _createCompoundFromChecked);
   document.getElementById('btn-clear-compounds')?.addEventListener('click', _clearAllCompounds);
@@ -666,25 +672,8 @@ function bindExplosionPanel() {
     statusBar.textContent = '已清除爆炸中心 (将使用几何重心)';
   });
 
-  document.getElementById('btn-gen-explosion')?.addEventListener('click', async () => {
-    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
-    if (!shared.sourceStpPath && !shared.bomSourcePath) {
-      _showModal('无可用数据',
-        '请先加载装配数据再生成爆炸视图:<br><br>' +
-        '<ul><li>方法1: <b>位置图 → 加载BOM</b> 加载多文件 BOM</li>' +
-        '<li>方法2: <b>Ctrl+I</b> 导入单文件 STP</li></ul>');
-      return;
-    }
-    const centerLabel = shared.explosionCenter ? ' (中心: ' + shared.explosionCenter + ')' : ' (几何重心)';
-    statusBar.textContent = '生成爆炸视图' + centerLabel + '...';
-    if (shared.bomSourcePath) {
-      await window.electronAPI.runBomExplosionPipelineCached(
-        shared.bomSourcePath, shared.bomModelsDir, shared.explosionCenter);
-    } else {
-      await window.electronAPI.runExplosionPipelineWithCenter(
-        shared.sourceStpPath, shared.explosionCenter);
-    }
-  });
+  document.getElementById('btn-create-compound')?.addEventListener('click', _createCompoundFromChecked);
+  document.getElementById('btn-clear-compounds')?.addEventListener('click', _clearAllCompounds);
 
   const slider = document.getElementById('slider-dist');
   const val = document.getElementById('val-dist');
@@ -693,8 +682,14 @@ function bindExplosionPanel() {
     val.textContent = v;
     sharedExplo.setExplosionDistance(v);
   });
-  document.getElementById('btn-explode')?.addEventListener('click', () => sharedExplo.explodeGroupsAnimated(800));
-  document.getElementById('btn-explode-instant')?.addEventListener('click', () => sharedExplo.explodeGroupsInstant());
+  document.getElementById('btn-explode')?.addEventListener('click', () => {
+    const center = sharedExplo.findCenterPoint(shared.explosionCenter);
+    sharedExplo.radialExplodeAnimated(center, sharedExplo.explosionDistance, 800, shared.compounds);
+  });
+  document.getElementById('btn-explode-instant')?.addEventListener('click', () => {
+    const center = sharedExplo.findCenterPoint(shared.explosionCenter);
+    sharedExplo.radialExplodeInstant(center, sharedExplo.explosionDistance, shared.compounds);
+  });
   document.getElementById('btn-reset')?.addEventListener('click', () => { sharedExplo.resetPositions(); sharedExplo.hideThrustLines(); });
   document.getElementById('btn-manual-on')?.addEventListener('click', () => sharedExplo.enableManualMode());
   document.getElementById('btn-manual-off')?.addEventListener('click', () => sharedExplo.disableManualMode());
@@ -706,9 +701,14 @@ function bindExplosionPanel() {
   document.getElementById('btn-annot-hide')?.addEventListener('click', () => annot.clear());
   document.getElementById('btn-thrust')?.addEventListener('click', () => sharedExplo.toggleThrustLines());
   document.getElementById('btn-export')?.addEventListener('click', _exportAnnotated);
+  document.getElementById('btn-export-svg-explosion')?.addEventListener('click', _exportSVG);
   _bindChainDemoButtons();
+  if (shared.groups && shared.groups.length > 0) {
+    sharedExplo.loadAssemblyGroups(shared.groups);
+  }
   buildActiveTree();
   _updateCenterDisplay();
+  _updateCompoundPreview();
 }
 
 function bindServiceabilityPanel() {
@@ -1410,6 +1410,22 @@ function _exportSimple() {
   const dataUrl = sm.renderer.domElement.toDataURL('image/png');
   if (window.electronAPI) window.electronAPI.saveScreenshot(dataUrl);
   else ExportManager.prototype._download(dataUrl, 'screenshot.png');
+}
+
+async function _exportSVG() {
+  annot.draw();
+  annot.updatePositions();
+  const w = viewport.clientWidth;
+  const h = viewport.clientHeight;
+  const dataUrl = sm.renderer.domElement.toDataURL('image/png');
+  const screenData = annot.getScreenData();
+  let svg = exportMgr.exportSVG(dataUrl, screenData, w, h, 'export.svg');
+  if (window.electronAPI) {
+    await window.electronAPI.saveSVG(svg);
+  } else {
+    exportMgr._downloadText(svg, 'export.svg');
+  }
+  statusBar.textContent = 'SVG 已导出';
 }
 
 // ── Pipeline Progress ───────────────────────────────────

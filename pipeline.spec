@@ -46,6 +46,7 @@ a = Analysis(
         'pipeline.dependency_chain',
         'pipeline._occ_lock',
         'pipeline.compound_utils',
+        'pipeline.model_cleaner',
         'numpy',
         'openpyxl',
         'trimesh',

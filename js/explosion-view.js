@@ -352,6 +352,151 @@ export class ExplosionView {
 
   setExplosionDistance(dist) { this.explosionDistance = dist; }
 
+  // ── Radial Explosion (center-outward, independent of pipeline) ─
+
+  radialExplodeInstant(centerPoint, distance, compounds) {
+    if (this.assemblyGroups.length === 0) return;
+    this.resetPositions();
+    const compoundMap = new Map();
+    if (compounds && compounds.length > 0) {
+      for (const c of compounds) {
+        for (const m of c.members) compoundMap.set(m, c.name);
+      }
+    }
+    const units = new Map();
+    for (const g of this.assemblyGroups) {
+      for (const mesh of g.meshes) {
+        if (this._isFixedMesh(mesh)) continue;
+        if (this._isExplosionCenter(mesh)) continue;
+        if (!mesh.visible) continue;
+        const wp = this.originalPositions.get(mesh);
+        if (!wp) continue;
+        const pid = mesh.userData.partId;
+        const key = (pid && compoundMap.has(pid)) ? 'CMP_' + compoundMap.get(pid) : '_SOLO_' + (g.id || Math.random());
+        if (!units.has(key)) units.set(key, { meshes: [], ctr: new THREE.Vector3() });
+        const u = units.get(key);
+        u.meshes.push(mesh);
+        u.ctr.add(wp);
+      }
+    }
+    if (units.size === 0) return;
+    const allDists = [];
+    for (const [, u] of units) {
+      u.ctr.divideScalar(u.meshes.length);
+      u.dist = u.ctr.distanceTo(centerPoint);
+      allDists.push(u.dist);
+    }
+    const maxDist = Math.max(...allDists, 1);
+    for (const [, u] of units) {
+      const rawDir = u.ctr.clone().sub(centerPoint);
+      const d = rawDir.length();
+      const dir = d < 0.01 ? new THREE.Vector3(0, 1, 0) : rawDir.normalize();
+      const distFactor = 1.0 + (u.dist / maxDist) * 0.5;
+      const offset = dir.multiplyScalar(distance * distFactor);
+      for (const mesh of u.meshes) {
+        const origin = this.originalPositions.get(mesh).clone();
+        this._applyWorldOffset(mesh, offset);
+        this.explodedPositions.set(mesh, origin.clone().add(offset));
+      }
+    }
+    this.isExploded = true;
+    this._setStatus('径向爆炸完成');
+  }
+
+  async radialExplodeAnimated(centerPoint, distance, duration, compounds) {
+    if (this.assemblyGroups.length === 0) return;
+    this.resetPositions();
+    const compoundMap = new Map();
+    if (compounds && compounds.length > 0) {
+      for (const c of compounds) {
+        for (const m of c.members) compoundMap.set(m, c.name);
+      }
+    }
+    const units = new Map();
+    for (const g of this.assemblyGroups) {
+      for (const mesh of g.meshes) {
+        if (this._isFixedMesh(mesh)) continue;
+        if (this._isExplosionCenter(mesh)) continue;
+        if (!mesh.visible) continue;
+        const wp = this.originalPositions.get(mesh);
+        if (!wp) continue;
+        const pid = mesh.userData.partId;
+        const key = (pid && compoundMap.has(pid)) ? 'CMP_' + compoundMap.get(pid) : '_SOLO_' + (g.id || Math.random());
+        if (!units.has(key)) units.set(key, { meshes: [], ctr: new THREE.Vector3() });
+        const u = units.get(key);
+        u.meshes.push(mesh);
+        u.ctr.add(wp);
+      }
+    }
+    if (units.size === 0) return;
+    const unitList = [];
+    for (const [, u] of units) {
+      u.ctr.divideScalar(u.meshes.length);
+      u.dist = u.ctr.distanceTo(centerPoint);
+      unitList.push(u);
+    }
+    unitList.sort((a, b) => b.dist - a.dist);
+    const maxDist = Math.max(...unitList.map(u => u.dist), 1);
+    const stageCount = Math.min(5, unitList.length);
+    const perStage = Math.ceil(unitList.length / stageCount);
+    for (let si = 0; si < stageCount; si++) {
+      const batch = unitList.slice(si * perStage, (si + 1) * perStage);
+      if (batch.length === 0) break;
+      this._setStatus('爆炸阶段 ' + (si + 1) + ' / ' + stageCount);
+      const targets = new Map();
+      for (const u of batch) {
+        const rawDir = u.ctr.clone().sub(centerPoint);
+        const d = rawDir.length();
+        const dir = d < 0.01 ? new THREE.Vector3(0, 1, 0) : rawDir.normalize();
+        const distFactor = 1.0 + (u.dist / maxDist) * 0.5;
+        const offset = dir.multiplyScalar(distance * distFactor);
+        for (const mesh of u.meshes) {
+          const origin = this.originalPositions.get(mesh).clone();
+          targets.set(mesh, origin.clone().add(offset));
+        }
+      }
+      if (targets.size > 0) {
+        await this._animateToPositions(targets, duration / stageCount);
+        await new Promise(r => setTimeout(r, 200));
+      }
+    }
+    this.isExploded = true;
+    this._setStatus('爆炸完成');
+  }
+
+  _computeSceneCenter() {
+    const c = new THREE.Vector3();
+    let n = 0;
+    for (const g of this.assemblyGroups) {
+      for (const mesh of g.meshes) {
+        if (this._isFixedMesh(mesh)) continue;
+        if (!mesh.visible) continue;
+        const wp = this.originalPositions.get(mesh);
+        if (!wp) continue;
+        c.add(wp);
+        n++;
+      }
+    }
+    return n > 0 ? c.divideScalar(n) : new THREE.Vector3();
+  }
+
+  findCenterPoint(centerNodeId) {
+    if (!centerNodeId) return this._computeSceneCenter();
+    let c = new THREE.Vector3();
+    let n = 0;
+    for (const g of this.assemblyGroups) {
+      for (const mesh of g.meshes) {
+        const pid = mesh.userData.partId;
+        if (!pid) continue;
+        if (pid === centerNodeId || pid.startsWith(centerNodeId)) {
+          const wp = this.originalPositions.get(mesh);
+          if (wp) { c.add(wp); n++; }
+        }
+      }
+    }
+    return n > 0 ? c.divideScalar(n) : this._computeSceneCenter();
+  }
+
   // ── Manual Move (TransformControls) ─────────────
 
   enableManualMode() {

@@ -30,6 +30,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Save PNG screenshot. Pass dataUrl, returns saved path or false. */
   saveScreenshot: (dataUrl) => ipcRenderer.invoke('save-screenshot', dataUrl),
 
+  /** Save SVG export. Pass svg string, returns saved path or false. */
+  saveSVG: (svgString) => ipcRenderer.invoke('save-svg', svgString),
+
   /** Read file at given path. Returns Buffer. */
   readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),
 

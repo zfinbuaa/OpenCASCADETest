@@ -67,6 +67,61 @@ export class Annotation {
     }
   }
 
+  getScreenData() {
+    if (!this.annotations) return [];
+    this.updatePositions();
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    const halfW = w / 2;
+    const halfH = h / 2;
+    const screenPoints = [];
+    for (const ann of this.annotations) {
+      const sp = ann.worldPos.clone().project(this.camera);
+      if (sp.z > 1) continue;
+      const sx = (sp.x * halfW) + halfW;
+      const sy = -(sp.y * halfH) + halfH;
+      if (sx < -100 || sx > w + 100 || sy < -100 || sy > h + 100) continue;
+      screenPoints.push({ sx, sy, ann });
+    }
+    if (screenPoints.length === 0) return [];
+    screenPoints.sort((a, b) => a.sy - b.sy);
+    const n = screenPoints.length;
+    const leftCount = Math.ceil(n / 2);
+    const rightCount = Math.floor(n / 2);
+    const leftX = COLUMN_MARGIN;
+    const rightX = w - COLUMN_MARGIN;
+    const topPad = 40;
+    const availH = h - 80;
+    const result = [];
+    let prevLeftSY = -999;
+    for (let i = 0; i < leftCount; i++) {
+      const { sx, sy, ann } = screenPoints[i];
+      let cy = topPad + (availH / (leftCount + 1)) * (i + 1);
+      if (i > 0 && Math.abs(sy - prevLeftSY) < 40) cy += 25;
+      prevLeftSY = sy;
+      result.push({
+        circleX: leftX, circleY: cy,
+        targetX: sx, targetY: sy,
+        number: ann.index + 1,
+        partId: ann.partId, partName: ann.partName,
+      });
+    }
+    let prevRightSY = -999;
+    for (let i = 0; i < rightCount; i++) {
+      const { sx, sy, ann } = screenPoints[leftCount + i];
+      let cy = topPad + (availH / (rightCount + 1)) * (i + 1);
+      if (i > 0 && Math.abs(sy - prevRightSY) < 40) cy += 25;
+      prevRightSY = sy;
+      result.push({
+        circleX: rightX, circleY: cy,
+        targetX: sx, targetY: sy,
+        number: ann.index + 1,
+        partId: ann.partId, partName: ann.partName,
+      });
+    }
+    return result;
+  }
+
   draw() {
     if (!this.visible || !this.annotations) {
       this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);

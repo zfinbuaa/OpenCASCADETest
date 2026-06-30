@@ -259,6 +259,8 @@ def main():
             "expected_chain_cost": target_detail.get("expected_chain_cost") if target_detail else None,
         }
         log("CHAIN_RESULT_JSON: " + json.dumps(chain_result, ensure_ascii=False))
+        _write_chain_log(stages, details, parts,
+                         args.input, args.target_part, args.output_dir)
     else:
         if args.skip_collision:
             from pipeline.explosion_planner import build_explosion_plan
@@ -851,6 +853,8 @@ def _run_bom_full(args):
             "expected_chain_cost": target_detail.get("expected_chain_cost") if target_detail else None,
         }
         log("CHAIN_RESULT_JSON: " + json.dumps(chain_result, ensure_ascii=False))
+        _write_chain_log(stages, details, flat_parts,
+                         args.bom, args.target_part, args.output_dir)
     else:
         if args.skip_collision:
             from pipeline.explosion_planner import build_explosion_plan
@@ -998,6 +1002,70 @@ def _merge_parts_to_compound(parts_list):
         if shape is not None:
             builder.Add(comp, shape)
     return comp
+
+
+def _write_chain_log(stages, details, parts, source_file, target_name, output_dir):
+    """Write a human-readable dependency chain log as chain_log.txt."""
+    if not stages:
+        return
+
+    part_map = {p["name"]: p for p in parts}
+    detail_map = {}
+    for d in details:
+        detail_map[d.get("part", "")] = d
+
+    lines = []
+    sep = "=" * 72
+    sub = "-" * 72
+    lines.append(sep)
+    lines.append("  依赖链拆卸日志")
+    lines.append(sep)
+    lines.append("  源文件:    {}".format(source_file))
+    lines.append("  目标零件:  {}".format(target_name))
+    feasible = sum(1 for s in stages
+                   for n in s
+                   if detail_map.get(n, {}).get("feasible", False))
+    blocked = sum(1 for s in stages for n in s) - feasible
+    lines.append("  链长:      {} 个零件 ({} 可行, {} 阻塞)".format(
+        sum(len(s) for s in stages), feasible, blocked))
+    lines.append(sub)
+    lines.append("  {:>4s} | {:<42s} | {:>4s} | {:^17s} | {:>7s}".format(
+        "顺序", "零件名称", "状态", "拆卸方向", "安全距离"))
+    lines.append(sub)
+
+    stage_idx = 0
+    for s_idx, stage_parts in enumerate(stages):
+        for name in stage_parts:
+            stage_idx += 1
+            info = detail_map.get(name, {})
+            is_feasible = info.get("feasible", False)
+            status = "OK" if is_feasible else "BLK"
+            direction = info.get("direction", [0, 0, 0])
+            dir_str = "({:+.0f},{:+.0f},{:+.0f})".format(
+                direction[0], direction[1], direction[2])
+            safe_d = info.get("safe_distance", 0.0)
+            safe_str = "{:.1f}mm".format(safe_d)
+            note = info.get("note", "")
+            display_name = name
+            part_entry = part_map.get(name)
+            if part_entry:
+                display_name = part_entry.get("name", name)
+            line = "  {:4d} | {:<42s} | {:>4s} | {:^17s} | {:>7s}".format(
+                stage_idx, display_name[:42], status, dir_str, safe_str)
+            if not is_feasible and note:
+                line += " | {}".format(note[:50])
+            lines.append(line)
+
+    lines.append(sub)
+    lines.append("  图例: OK=可行  BLK=阻塞")
+    lines.append("  方向格式: (X,Y,Z) 单位向量, +Y=上方")
+    lines.append(sep)
+
+    report = "\n".join(lines)
+    report_path = os.path.join(output_dir, "chain_log.txt")
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(report)
+    log(report)
 
 
 def _prefix_hierarchy_roots(roots, prefix):
