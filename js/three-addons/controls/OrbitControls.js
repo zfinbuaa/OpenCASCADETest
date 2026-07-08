@@ -231,8 +231,25 @@ class OrbitControls extends EventDispatcher {
 
 				}
 
-				// restrict phi to be between desired limits
-				spherical.phi = Math.max( scope.minPolarAngle, Math.min( scope.maxPolarAngle, spherical.phi ) );
+				// restrict phi to be between desired limits with pole wrapping
+				const _phiMin = scope.minPolarAngle;
+				const _phiMax = scope.maxPolarAngle;
+				const _phiRange = _phiMax - _phiMin;
+
+				if ( spherical.phi < _phiMin || spherical.phi > _phiMax ) {
+					const _excess = spherical.phi < _phiMin
+						? _phiMin - spherical.phi
+						: spherical.phi - _phiMax;
+					spherical.phi = spherical.phi < _phiMin
+						? _phiMax - ( _excess % _phiRange )
+						: _phiMin + ( _excess % _phiRange );
+					const _wraps = 1 + Math.floor( ( _excess - 1e-12 ) / _phiRange );
+					if ( _wraps % 2 === 1 ) {
+						spherical.theta += Math.PI;
+					}
+				}
+
+				spherical.phi = Math.max( _phiMin, Math.min( _phiMax, spherical.phi ) );
 
 				spherical.makeSafe();
 

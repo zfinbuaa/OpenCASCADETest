@@ -47,6 +47,15 @@ export class Annotation {
     this.annotations = [];
   }
 
+  setSingleLabel(partIds, labelText) {
+    this.annotations = [{
+      partIds: new Set(partIds),
+      partName: labelText,
+      index: 0,
+      worldPos: new THREE.Vector3(),
+    }];
+  }
+
   updatePositions() {
     if (!this.annotations) return;
     for (const ann of this.annotations) {

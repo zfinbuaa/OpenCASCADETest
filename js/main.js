@@ -59,11 +59,12 @@ const shared = {
 
 // ── Per-tab state ─────────────────────────────────────────
 const tabs = [
+  { mode: 'compare', tree: null },
+  { mode: 'clean', tree: null },
   { mode: 'position', tree: null },
   { mode: 'explosion', tree: null },
   { mode: 'serviceability', tree: null },
   { mode: 'manual', tree: null },
-  { mode: 'clean', tree: null },
   { mode: 'help', tree: null },
 ];
 
@@ -86,7 +87,7 @@ function switchTab(idx) {
   activeTab = idx;
   tabBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
 
-  const titles = ['位置图', '爆炸图', '拆装方案（可维修性）', '拆装方案（维修手册）', '数模清洗', '帮助'];
+  const titles = ['数模对比', '数模清洗', '位置图', '爆炸图', '拆装方案（可维修性）', '拆装方案（维修手册）', '帮助'];
   panelHeader.textContent = titles[idx];
 
   renderPanel(idx);
@@ -97,12 +98,13 @@ function switchTab(idx) {
 function renderPanel(idx) {
   panelBody.innerHTML = '';
   switch (idx) {
-    case 0: renderPositionPanel(); break;
-    case 1: renderExplosionPanel(); break;
-    case 2: renderServiceabilityPanel(); break;
-    case 3: renderManualPanel(); break;
-    case 4: renderCleanPanel(); break;
-    case 5: renderHelpPanel(); break;
+    case 0: renderComparePanel(); break;
+    case 1: renderCleanPanel(); break;
+    case 2: renderPositionPanel(); break;
+    case 3: renderExplosionPanel(); break;
+    case 4: renderServiceabilityPanel(); break;
+    case 5: renderManualPanel(); break;
+    case 6: renderHelpPanel(); break;
   }
 }
 
@@ -178,12 +180,98 @@ function _renderBomList() {
   }
 }
 
+function renderComparePanel() {
+  let h = '';
+  h += '<div class="section-title">对比操作</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-pri" id="btn-compare-run">选择对比表格 → 开始对比</button>';
+  h += '</div>';
+  h += '<div class="section-title">管线进度</div>';
+  h += '<div id="pipeline-log-placeholder" style="margin:4px 10px;padding:6px;background:#0a0a1a;border-radius:3px;font-family:Consolas,monospace;font-size:9px;color:#7ec8e3;max-height:150px;overflow-y:auto;"></div>';
+  h += '<div class="section-title">对比结果</div>';
+  h += '<div id="compare-result" style="margin:4px 10px;font-size:11px;color:#ccc;max-height:calc(100vh - 380px);overflow-y:auto;"></div>';
+  panelBody.innerHTML = h;
+  bindComparePanel();
+}
+
+function bindComparePanel() {
+  document.getElementById('btn-compare-run')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    statusBar.textContent = '启动数模对比...';
+    await window.electronAPI.runComparePipeline();
+  });
+  buildActiveTree();
+}
+
+function _renderCompareResult(payload) {
+  const el = document.getElementById('compare-result');
+  if (!el) return;
+
+  const pairs = payload.pairs || [];
+  const total = payload.total_pairs || pairs.length;
+  const identical = payload.identical ?? 0;
+  const minorDiff = payload.minor_diff ?? 0;
+  const significantDiff = payload.significant_diff ?? 0;
+  const failed = payload.failed ?? 0;
+
+  let h = '';
+  h += '<div style="padding:6px;margin-bottom:6px;background:#1a2a4a;border-radius:3px;">';
+  h += '<span style="color:#7ec8e3;font-weight:bold;">对比汇总</span><br>';
+  h += '总共 ' + total + ' 对 | ';
+  h += '<span style="color:#2ecc71">一致 ' + identical + '</span> | ';
+  h += '<span style="color:#f39c12">细微差异 ' + minorDiff + '</span> | ';
+  h += '<span style="color:#e74c3c">明显不一致 ' + significantDiff + '</span>';
+  if (failed > 0) h += ' | <span style="color:#888">失败 ' + failed + '</span>';
+  h += '</div>';
+
+  if (pairs.length === 0) {
+    h += '<div style="color:#889;">无对比结果</div>';
+    el.innerHTML = h;
+    return;
+  }
+
+  for (const pair of pairs) {
+    const cls = pair.classification || 'error';
+    let badgeColor = '#888';
+    if (cls === '一致') badgeColor = '#2ecc71';
+    else if (cls === '细微差异') badgeColor = '#f39c12';
+    else if (cls === '明显不一致') badgeColor = '#e74c3c';
+
+    h += '<div style="margin-bottom:8px;padding:6px;background:#0d1b33;border-radius:3px;border-left:3px solid ' + badgeColor + ';">';
+    h += '<div style="font-weight:bold;">';
+    h += pair.code_a + ' ↔ ' + pair.code_b;
+    h += ' <span style="display:inline-block;padding:1px 6px;border-radius:2px;font-size:10px;background:' + badgeColor + ';color:#fff;">' + (cls || '?') + '</span>';
+    h += '</div>';
+
+    if (pair.error) {
+      h += '<div style="color:#e74c3c;margin-top:2px;">错误: ' + (pair.message || pair.error) + '</div>';
+    } else {
+      const g = pair.geometric || {};
+      const simPct = (g.similarity != null ? (g.similarity * 100).toFixed(1) : '?') + '%';
+      h += '<div style="margin-top:2px;font-size:10px;">';
+      h += '相似度: <b>' + simPct + '</b> | ';
+      h += '体积A: ' + (g.volume_a != null ? g.volume_a.toFixed(0) : '?') + ' | ';
+      h += '体积B: ' + (g.volume_b != null ? g.volume_b.toFixed(0) : '?') + ' | ';
+      h += '交集体积: ' + (g.intersection_volume != null ? g.intersection_volume.toFixed(0) : '?');
+      h += '</div>';
+      const s = pair.structural || {};
+      if (s.part_count_a != null && s.part_count_b != null) {
+        h += '<div style="margin-top:2px;font-size:10px;color:#889;">';
+        h += '零件: A=' + s.part_count_a + ' B=' + s.part_count_b;
+        h += '</div>';
+      }
+    }
+    h += '</div>';
+  }
+
+  el.innerHTML = h;
+}
+
 function renderPositionPanel() {
   let h = '';
   h += '<div class="section-title">数据加载</div>';
   h += '<div class="btn-group">';
-  h += '<button class="btn btn-pri" id="btn-load-bom">加载 BOM (多文件)</button>';
-  h += '<button class="btn btn-outline" id="btn-load-assembly">加载 JSON</button>';
+  h += '<button class="btn btn-pri" id="btn-load-bom">批量生成位置图</button>';
   h += '</div>';
   h += '<div class="section-title">车壳选择</div>';
   h += '<select class="sel" id="sel-body">';
@@ -221,28 +309,22 @@ function renderPositionPanel() {
 
 function renderExplosionPanel() {
   let h = '';
-  h += '<div class="section-title">数据加载</div>';
+  h += '<div class="section-title">编组管理</div>';
   h += '<div class="btn-group">';
-  h += '<button class="btn btn-pri" id="btn-load-bom-explosion">加载 BOM + 分析</button>';
-  h += '<button class="btn btn-outline" id="btn-load">加载 JSON</button>';
+  h += '<button class="btn btn-outline" id="btn-create-compound">勾选部件 → 创建编组</button>';
+  h += '<button class="btn btn-outline" id="btn-clear-compounds">清空编组</button>';
   h += '</div>';
+  h += '<div id="compound-preview" style="margin:4px 10px;font-size:10px;color:#889;min-height:18px;">未创建编组</div>';
   h += '<div class="section-title">爆炸中心</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-outline" id="btn-set-center">选中爆炸中心</button>';
   h += '<button class="btn btn-outline" id="btn-clear-center">清除中心</button>';
   h += '</div>';
   h += '<div id="center-display" style="margin:4px 12px;font-size:11px;color:#7ec8e3;">未设置 (使用几何重心)</div>';
-  h += '<div class="section-title">标注管理</div>';
-  h += '<div class="btn-group">';
-  h += '<button class="btn btn-outline" id="btn-create-compound">勾选部件 → 生成标注</button>';
-  h += '<button class="btn btn-outline" id="btn-clear-compounds">清空标注</button>';
-  h += '</div>';
-  h += '<div id="compound-preview" style="margin:4px 10px;font-size:10px;color:#889;min-height:18px;">未创建标注</div>';
   h += '<div class="section-title">爆炸控制</div>';
   h += '<div class="slider-row"><span>距离</span><input type="range" id="slider-dist" min="10" max="2000" value="150" step="5"><span id="val-dist">150</span>mm</div>';
   h += '<div class="btn-group">';
-  h += '<button class="btn btn-pri" id="btn-explode">逐阶段爆炸</button>';
-  h += '<button class="btn btn-outline" id="btn-explode-instant">一键爆炸</button>';
+  h += '<button class="btn btn-pri" id="btn-explode-instant">爆炸</button>';
   h += '<button class="btn btn-outline" id="btn-reset">复位</button></div>';
   h += '<div class="section-title">手动移动</div>';
   h += '<div class="btn-group">';
@@ -351,68 +433,195 @@ function renderCleanPanel() {
   bindCleanPanel();
 }
 
+const HELP_FEATURES = [
+  {
+    folder: '01-compare',
+    title: '数模对比',
+    desc: '加载对比Excel表格(Sheet3, A列/B列为模型代号)，自动完成两个STP数模的整体几何对比。算法: 质心自动对齐 → 布尔交/差集体积计算 → 分类为一致/细微差异/明显不一致。',
+  },
+  {
+    folder: '02-clean',
+    title: '数模清洗',
+    desc: '按BOM表格J列匹配零件 + 干涉检查 + 去重清洗模型。菜单 文件 → 数模清洗 (STP + BOM)。',
+  },
+  {
+    folder: '03-position',
+    title: '位置图',
+    desc: '以原始装配位置查看全部零件。左侧结构树点击零件可高亮聚焦。右侧面板可切换车壳叠加显示。操作: 菜单 文件 → 加载单个 STEP 文件 (Ctrl+O) 或 通过表格加载多个 STEP 文件 (Ctrl+B)。',
+  },
+  {
+    folder: '04-explosion',
+    title: '爆炸图',
+    desc: '查看零件的爆炸分解视图，支持手动调整爆炸程度和位置。通过右侧滑块控制爆炸程度(0%-100%)，或点击"一键爆炸"立即展开。支持 TransformControls 手动拖拽调整单个零件位置，可选显示推力线标注爆炸方向。',
+  },
+  {
+    folder: '05-serviceability',
+    title: '拆装方案（可维修性）',
+    desc: '为整个装配体生成完整的分阶段拆卸序列。菜单 管线 → 生成拆装方案 (Ctrl+G) 触发8步分析管线。产出: 分阶段拆卸顺序列表 + 步骤动画演示。编组管理: 勾选零件后可根据标注生成编组。',
+  },
+  {
+    folder: '06-manual',
+    title: '拆装方案（维修手册）',
+    desc: '针对指定目标零件，计算"要拆这个零件必须先拆哪些"的完整依赖链条。算法: 从26个候选方向中选出最优8个 → 并行碰撞检测 → 光束搜索(K=4)递归模拟总拆卸成本 → 选择最优方向。产出: 依赖链概要 + 方向对比表 + 逐阶段拆卸顺序 + AI最佳拆装路径动画。',
+  },
+];
+
+let _helpFeatureIdx = 0;
+let _helpImageIdx = 0;
+let _helpImageList = [];
+
+function _showHelpCarousel(startFeatureIndex) {
+  const existing = document.getElementById('help-carousel-overlay');
+  if (existing) existing.remove();
+
+  _helpFeatureIdx = (startFeatureIndex >= 0 && startFeatureIndex < HELP_FEATURES.length) ? startFeatureIndex : 0;
+  _helpImageIdx = 0;
+  _helpImageList = [];
+
+  const overlay = document.createElement('div');
+  overlay.id = 'help-carousel-overlay';
+  overlay.tabIndex = 0;
+  overlay.style.cssText =
+    'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);' +
+    'z-index:9999;display:flex;align-items:center;justify-content:center;outline:none;';
+  overlay.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight') { e.preventDefault(); _helpShift(1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); _helpShift(-1); }
+    else if (e.key === 'Escape') { e.preventDefault(); overlay.remove(); }
+  });
+
+  const box = document.createElement('div');
+  box.style.cssText =
+    'background:#1a1a2e;color:#e0e0e0;border:1px solid #3a3a5a;border-radius:8px;' +
+    'padding:16px 20px 12px;max-width:1230px;min-width:960px;' +
+    'box-shadow:0 8px 32px rgba(0,0,0,0.7);display:flex;flex-direction:column;' +
+    'max-height:92vh;';
+  box.addEventListener('click', (e) => e.stopPropagation());
+
+  box.innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
+    '<h3 style="margin:0;font-size:14px;color:#7ec8e3;">帮助</h3>' +
+    '<button id="help-carousel-close" style="background:none;border:none;color:#999;font-size:18px;' +
+    'cursor:pointer;padding:0 4px;line-height:1;" title="关闭">&times;</button>' +
+    '</div>' +
+    '<div id="help-feature-tabs" style="display:flex;gap:2px;margin-bottom:10px;flex-wrap:wrap;"></div>' +
+    '<div style="display:flex;align-items:center;gap:8px;flex:1;min-height:0;">' +
+    '<button id="help-carousel-prev" style="background:rgba(255,255,255,0.08);border:1px solid #3a3a5a;' +
+    'color:#ccc;font-size:24px;cursor:pointer;border-radius:4px;padding:10px 14px;' +
+    'flex-shrink:0;user-select:none;" title="上一张">&lt;</button>' +
+    '<div style="flex:1;display:flex;align-items:center;justify-content:center;' +
+    'background:#0a0a1a;border-radius:4px;overflow:hidden;min-height:300px;max-height:55vh;">' +
+    '<img id="help-carousel-img" style="max-width:100%;max-height:55vh;object-fit:contain;display:none;" />' +
+    '<span id="help-carousel-placeholder" style="color:#666;font-size:13px;">加载中...</span>' +
+    '</div>' +
+    '<button id="help-carousel-next" style="background:rgba(255,255,255,0.08);border:1px solid #3a3a5a;' +
+    'color:#ccc;font-size:24px;cursor:pointer;border-radius:4px;padding:10px 14px;' +
+    'flex-shrink:0;user-select:none;" title="下一张">&gt;</button>' +
+    '</div>' +
+    '<p id="help-carousel-desc" style="margin:10px 0 8px;font-size:12px;line-height:1.6;color:#bbb;text-align:center;"></p>' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;">' +
+    '<div id="help-carousel-dots" style="display:flex;gap:6px;"></div>' +
+    '<span id="help-carousel-counter" style="font-size:11px;color:#888;"></span>' +
+    '</div>';
+
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+
+  document.getElementById('help-carousel-close').onclick = () => overlay.remove();
+  document.getElementById('help-carousel-prev').onclick = () => _helpShift(-1);
+  document.getElementById('help-carousel-next').onclick = () => _helpShift(1);
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  _helpRender();
+  overlay.focus();
+}
+
+async function _helpRender() {
+  const feature = HELP_FEATURES[_helpFeatureIdx];
+
+  const tabs = document.getElementById('help-feature-tabs');
+  tabs.innerHTML = '';
+  for (let i = 0; i < HELP_FEATURES.length; i++) {
+    const tab = document.createElement('button');
+    const active = i === _helpFeatureIdx;
+    tab.textContent = HELP_FEATURES[i].title;
+    tab.style.cssText =
+      'padding:5px 10px;font-size:11px;border:1px solid ' + (active ? '#7ec8e3' : '#3a3a5a') + ';' +
+      'background:' + (active ? '#2a5a8c' : 'transparent') + ';color:' + (active ? '#fff' : '#aaa') + ';' +
+      'border-radius:3px;cursor:pointer;white-space:nowrap;';
+    (function (idx) { tab.onclick = () => _helpSwitchFeature(idx); })(i);
+    tabs.appendChild(tab);
+  }
+
+  document.getElementById('help-carousel-desc').textContent = feature.desc;
+
+  if (window.electronAPI && window.electronAPI.listHelpImages) {
+    _helpImageList = await window.electronAPI.listHelpImages(feature.folder);
+  } else {
+    _helpImageList = [];
+  }
+
+  if (_helpImageIdx >= _helpImageList.length) _helpImageIdx = Math.max(0, _helpImageList.length - 1);
+
+  const hasImages = _helpImageList.length > 0;
+  document.getElementById('help-carousel-counter').textContent = hasImages
+    ? (_helpImageIdx + 1) + ' / ' + _helpImageList.length
+    : '无图片';
+  document.getElementById('help-carousel-prev').style.visibility =
+    (hasImages && _helpImageIdx > 0) ? 'visible' : 'hidden';
+  document.getElementById('help-carousel-next').style.visibility =
+    (hasImages && _helpImageIdx < _helpImageList.length - 1) ? 'visible' : 'hidden';
+
+  const dots = document.getElementById('help-carousel-dots');
+  dots.innerHTML = '';
+  for (let i = 0; i < _helpImageList.length; i++) {
+    const dot = document.createElement('span');
+    dot.style.cssText =
+      'width:8px;height:8px;border-radius:50%;background:' + (i === _helpImageIdx ? '#7ec8e3' : '#555') + ';' +
+      'display:inline-block;cursor:pointer;';
+    (function (idx) { dot.onclick = () => { _helpImageIdx = idx; _helpRender(); }; })(i);
+    dots.appendChild(dot);
+  }
+
+  const img = document.getElementById('help-carousel-img');
+  const placeholder = document.getElementById('help-carousel-placeholder');
+  img.style.display = 'none';
+  placeholder.style.display = 'inline';
+
+  if (hasImages && window.electronAPI && window.electronAPI.readHelpImage) {
+    const dataUrl = await window.electronAPI.readHelpImage(feature.folder, _helpImageList[_helpImageIdx]);
+    if (dataUrl) {
+      img.src = dataUrl;
+      img.style.display = 'inline';
+      placeholder.style.display = 'none';
+    } else {
+      placeholder.textContent = '图片未找到: ' + feature.folder + '/' + _helpImageList[_helpImageIdx];
+    }
+  } else if (!hasImages) {
+    placeholder.textContent = '该功能暂无示意图';
+  } else {
+    placeholder.textContent = '图片加载不可用（非 Electron 环境）';
+  }
+}
+
+function _helpShift(delta) {
+  const nextIdx = _helpImageIdx + delta;
+  if (nextIdx < 0 || nextIdx >= _helpImageList.length) return;
+  _helpImageIdx = nextIdx;
+  _helpRender();
+}
+
+function _helpSwitchFeature(idx) {
+  if (idx === _helpFeatureIdx) return;
+  _helpFeatureIdx = idx;
+  _helpImageIdx = 0;
+  _helpImageList = [];
+  _helpRender();
+}
+
 function renderHelpPanel() {
-  panelBody.innerHTML = `
-    <div class="section-title">帮助</div>
-    <div class="help-content" style="padding:8px 16px;font-size:12px;line-height:1.7;overflow-y:auto;max-height:calc(100vh - 160px);">
-      <h3 style="color:#7ec8e3;margin:12px 0 6px;">系统架构</h3>
-      <p>基于 OpenCASCADE (OCCT) + Three.js + Electron 的三维装配体自动拆装方案生成与可视化系统。</p>
-      <p>输入 STEP (.stp) 格式的三维装配体模型，自动输出拆装顺序、爆炸方向、碰撞验证报告，并在桌面前端以交互式爆炸图展示。</p>
-      
-      <h3 style="color:#7ec8e3;margin:12px 0 6px;">功能页面</h3>
-      
-      <details open><summary style="cursor:pointer;color:#7ec8e3;font-weight:600;">位置图</summary>
-        <p style="padding-left:12px;">以原始装配位置查看全部零件。左侧结构树点击零件可高亮聚焦。右侧面板可切换车壳叠加显示。</p>
-        <p style="padding-left:12px;">操作: 菜单 文件 → 加载单个 STEP 文件 (Ctrl+O) 或 通过表格加载多个 STEP 文件 (Ctrl+B)。</p>
-      </details>
-
-      <details open><summary style="cursor:pointer;color:#7ec8e3;font-weight:600;">爆炸图</summary>
-        <p style="padding-left:12px;">查看零件的爆炸分解视图，支持手动调整爆炸程度和位置。通过右侧滑块控制爆炸程度(0%-100%)，或点击"一键爆炸"立即展开。</p>
-        <p style="padding-left:12px;">支持 TransformControls 手动拖拽调整单个零件位置，可选显示推力线标注爆炸方向。</p>
-      </details>
-
-      <details open><summary style="cursor:pointer;color:#7ec8e3;font-weight:600;">拆装方案（可维修性）</summary>
-        <p style="padding-left:12px;">为整个装配体生成完整的分阶段拆卸序列。菜单 管线 → 生成拆装方案 (Ctrl+G) 触发8步分析管线。</p>
-        <p style="padding-left:12px;">产出: 分阶段拆卸顺序列表 + 步骤动画演示。编组管理: 勾选零件后可根据标注生成编组。</p>
-      </details>
-
-      <details open><summary style="cursor:pointer;color:#7ec8e3;font-weight:600;">拆装方案（维修手册）</summary>
-        <p style="padding-left:12px;">针对指定目标零件，计算"要拆这个零件必须先拆哪些"的完整依赖链条。</p>
-        <p style="padding-left:12px;">算法: 从26个候选方向中选出最优8个 → 并行碰撞检测 → 光束搜索(K=4)递归模拟总拆卸成本 → 选择最优方向。</p>
-        <p style="padding-left:12px;">产出: 依赖链概要 + 方向对比表 + 逐阶段拆卸顺序 + AI最佳拆装路径动画。</p>
-      </details>
-
-      <details open><summary style="cursor:pointer;color:#7ec8e3;font-weight:600;">数模清洗</summary>
-        <p style="padding-left:12px;">按BOM表格J列匹配零件 + 干涉检查 + 去重清洗模型。菜单 文件 → 数模清洗 (STP + BOM)。</p>
-      </details>
-
-      <h3 style="color:#7ec8e3;margin:12px 0 6px;">BOM多文件加载</h3>
-      <p>当装配体零件分散在多个STEP文件中时，通过Excel表格统一加载。H列为零件名称，J列为零件编码。</p>
-
-      <h3 style="color:#7ec8e3;margin:12px 0 6px;">碰撞检测</h3>
-      <p>零件沿拆卸方向扫掠100mm(默认值)。若能无障碍移动100mm则视为"可以拆除"。可通过 --explosion-distance 参数调整。</p>
-
-      <h3 style="color:#7ec8e3;margin:12px 0 6px;">安装与运行</h3>
-      <p>环境: Node.js ≥ 16, Python ≥ 3.10 + conda, pythonocc-core ≥ 7.8</p>
-      <p>开发运行: npm start | 构建: build_portable.bat</p>
-
-      <h3 style="color:#7ec8e3;margin:12px 0 6px;">命令行管线</h3>
-      <pre style="background:#0a0a1a;padding:8px;border-radius:3px;font-size:10px;overflow-x:auto;">
-python pipeline.py input.stp --preview --output-dir ./output/
-python pipeline.py input.stp --output-dir ./output/
-python pipeline.py input.stp --output-dir ./output/ --skip-collision
-python pipeline.py input.stp --output-dir ./output/ --explosion-distance 200
-python pipeline.py assembly.json --validate --output-dir ./output/</pre>
-
-      <h3 style="color:#7ec8e3;margin:12px 0 6px;">输出格式</h3>
-      <p>assembly.json + parts/*.glb + report.txt</p>
-      <p>零件字段: id, name, glbFile, isFastener, disassemblyStage, direction, distanceMultiplier, directionConfidence, color</p>
-
-      <h3 style="color:#7ec8e3;margin:12px 0 6px;">技术栈</h3>
-      <p>几何内核: OpenCASCADE 7.9 | 3D渲染: Three.js 0.157 | 桌面框架: Electron | 打包: PyInstaller + electron-builder</p>
-      <p style="margin-top:16px;color:#889;">版本 2.0 | License: LGPL-3.0</p>
-    </div>`;
-  _bindHelpPanel();
+  panelBody.innerHTML = '';
+  _showHelpCarousel(0);
 }
 
 function _bindHelpPanel() {
@@ -561,11 +770,8 @@ function _bindDisassemblyButtons() {
 function bindPositionPanel() {
   document.getElementById('btn-load-bom')?.addEventListener('click', async () => {
     if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
-    statusBar.textContent = '加载 BOM 中...';
-    await window.electronAPI.runBomPreviewPipeline();
+    await _batchPositionCapture();
   });
-
-  document.getElementById('btn-load-assembly')?.addEventListener('click', loadAssembly);
 
   document.getElementById('sel-body')?.addEventListener('change', async (e) => {
     await bodyLoader.switchBody(e.target.selectedIndex, sm.scene);
@@ -645,14 +851,17 @@ function _updateCenterDisplay() {
   }
 }
 
-function bindExplosionPanel() {
-  document.getElementById('btn-load-bom-explosion')?.addEventListener('click', async () => {
-    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
-    statusBar.textContent = 'BOM 全管线分析中...';
-    await window.electronAPI.runBomFullPipeline(null);
-  });
-  document.getElementById('btn-load')?.addEventListener('click', loadAssembly);
+function _buildHierarchyLeafMap() {
+  const map = new Map();
+  function walk(node) {
+    map.set(node.id, node.partIds || []);
+    for (const c of node.children || []) walk(c);
+  }
+  for (const root of (shared.hierarchy || [])) walk(root);
+  return map;
+}
 
+function bindExplosionPanel() {
   document.getElementById('btn-set-center')?.addEventListener('click', () => {
     const sel = shared.selectedNode
              || (tabs[activeTab].tree ? tabs[activeTab].tree.getCheckedNodeId() : null);
@@ -664,12 +873,35 @@ function bindExplosionPanel() {
     shared.explosionCenter = sel;
     _updateCenterDisplay();
     statusBar.textContent = '已设置爆炸中心: ' + sel;
+    if (sharedExplo.isExploded) {
+      sharedExplo._lastExplosionCenter = sharedExplo.findCenterPoint(
+        sel, _buildHierarchyLeafMap());
+      sharedExplo.resetPositions();
+      if (sharedExplo._lastCompounds != null) {
+        sharedExplo._doRadialExplode(
+          sharedExplo._lastExplosionCenter,
+          sharedExplo.explosionDistance,
+          sharedExplo._lastCompounds);
+      }
+      sharedExplo.isExploded = true;
+    }
   });
 
   document.getElementById('btn-clear-center')?.addEventListener('click', () => {
     shared.explosionCenter = null;
     _updateCenterDisplay();
     statusBar.textContent = '已清除爆炸中心 (将使用几何重心)';
+    if (sharedExplo.isExploded) {
+      sharedExplo._lastExplosionCenter = sharedExplo.findCenterPoint(null, _buildHierarchyLeafMap());
+      sharedExplo.resetPositions();
+      if (sharedExplo._lastCompounds != null) {
+        sharedExplo._doRadialExplode(
+          sharedExplo._lastExplosionCenter,
+          sharedExplo.explosionDistance,
+          sharedExplo._lastCompounds);
+      }
+      sharedExplo.isExploded = true;
+    }
   });
 
   document.getElementById('btn-create-compound')?.addEventListener('click', _createCompoundFromChecked);
@@ -682,12 +914,9 @@ function bindExplosionPanel() {
     val.textContent = v;
     sharedExplo.setExplosionDistance(v);
   });
-  document.getElementById('btn-explode')?.addEventListener('click', () => {
-    const center = sharedExplo.findCenterPoint(shared.explosionCenter);
-    sharedExplo.radialExplodeAnimated(center, sharedExplo.explosionDistance, 800, shared.compounds);
-  });
   document.getElementById('btn-explode-instant')?.addEventListener('click', () => {
-    const center = sharedExplo.findCenterPoint(shared.explosionCenter);
+    const leafMap = _buildHierarchyLeafMap();
+    const center = sharedExplo.findCenterPoint(shared.explosionCenter, leafMap);
     sharedExplo.radialExplodeInstant(center, sharedExplo.explosionDistance, shared.compounds);
   });
   document.getElementById('btn-reset')?.addEventListener('click', () => { sharedExplo.resetPositions(); sharedExplo.hideThrustLines(); });
@@ -973,12 +1202,18 @@ function buildActiveTree() {
       shared.selectedNode = nodeId;
       _highlightParts(partIds);
       if (partIds.length > 0) {
+        const box = new THREE.Box3();
+        const idSet = new Set(partIds);
         for (const mesh of shared.meshes) {
-          if (mesh.userData.partId === partIds[0]) {
-            const box = new THREE.Box3().setFromObject(mesh);
-            const c = new THREE.Vector3(); box.getCenter(c);
-            sm.focusOn(c, 300); break;
+          if (idSet.has(mesh.userData.partId)) {
+            box.expandByObject(mesh);
           }
+        }
+        if (!box.isEmpty()) {
+          const c = new THREE.Vector3(); box.getCenter(c);
+          const sz = new THREE.Vector3(); box.getSize(sz);
+          const diag = Math.sqrt(sz.x * sz.x + sz.y * sz.y + sz.z * sz.z);
+          sm.focusOn(c, diag);
         }
       }
       statusBar.textContent = '选中: ' + nodeId + ' (' + partIds.length + ' 零件)';
@@ -1028,13 +1263,18 @@ function buildActiveTree() {
     },
     onCompoundFocus: (name, members) => {
       if (members.length > 0) {
-        const pid = members[0];
+        const box = new THREE.Box3();
+        const idSet = new Set(members);
         for (const mesh of shared.meshes) {
-          if (mesh.userData.partId === pid) {
-            const box = new THREE.Box3().setFromObject(mesh);
-            const c = new THREE.Vector3(); box.getCenter(c);
-            sm.focusOn(c, 300); break;
+          if (idSet.has(mesh.userData.partId)) {
+            box.expandByObject(mesh);
           }
+        }
+        if (!box.isEmpty()) {
+          const c = new THREE.Vector3(); box.getCenter(c);
+          const sz = new THREE.Vector3(); box.getSize(sz);
+          const diag = Math.sqrt(sz.x * sz.x + sz.y * sz.y + sz.z * sz.z);
+          sm.focusOn(c, diag);
         }
       }
     },
@@ -1428,6 +1668,285 @@ async function _exportSVG() {
   statusBar.textContent = 'SVG 已导出';
 }
 
+// ── Batch Position Capture ──────────────────────────────
+
+async function _batchPositionCapture() {
+  if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+
+  statusBar.textContent = '正在准备批量生成位置图...';
+
+  const setup = await window.electronAPI.selectBatchPositionFiles();
+  if (!setup) { statusBar.textContent = '已取消'; return; }
+
+  const outputDir = setup.outputDir;
+  const excelFiles = setup.excelFiles;
+
+  statusBar.textContent = '导入车壳...';
+  try {
+    const result = await window.electronAPI.importBodyFromPath(setup.bodyStpPath);
+    if (!result || !result.ok) {
+      statusBar.textContent = '车壳导入失败，请重试';
+      return;
+    }
+    await bodyLoader.reloadBodies();
+    const idx = bodyLoader.bodies.findIndex(b => b.name === result.name);
+    if (idx >= 0) {
+      await bodyLoader.switchBody(idx, sm.scene);
+    } else {
+      statusBar.textContent = '车壳加载失败: 未找到 ' + result.name;
+      return;
+    }
+  } catch (e) {
+    statusBar.textContent = '车壳导入出错: ' + (e && e.message || e);
+    return;
+  }
+
+  const bodyGroup = bodyLoader.currentBody ? bodyLoader.currentBody.group : null;
+  if (!bodyGroup) {
+    statusBar.textContent = '车壳未加载，请先导入车壳';
+    return;
+  }
+  _setBodyGroupOpacity(bodyGroup, 0.3);
+
+  let totalComponents = 0;
+  let successCount = 0;
+  let skipCount = 0;
+
+  for (let fi = 0; fi < excelFiles.length; fi++) {
+    const excel = excelFiles[fi];
+    const tableName = path__basename(excel.path, '.xlsx');
+
+    statusBar.textContent = '[' + (fi + 1) + '/' + excelFiles.length + '] ' + tableName + ' — 管线运行中...';
+    _logPipeline('=== 批量位置图: ' + tableName + ' ===');
+
+    const jsonPath = await window.electronAPI.runBomPreviewPipelineCached(excel.path, excel.dir);
+    if (!jsonPath) {
+      statusBar.textContent = '[' + (fi + 1) + '/' + excelFiles.length + '] ' + tableName + ' — 管线失败，跳过';
+      skipCount++;
+      continue;
+    }
+
+    const dir = jsonPath.replace(/[\\/][^\\/]*$/, '');
+    let buf;
+    try { buf = await window.electronAPI.readFile(jsonPath); } catch (e) { skipCount++; continue; }
+    const assembly = JSON.parse(new TextDecoder().decode(buf));
+
+    statusBar.textContent = '[' + (fi + 1) + '/' + excelFiles.length + '] ' + tableName + ' — 加载部件...';
+    await _loadModelCoreSilently(assembly, dir);
+
+    const bomEntries = _buildBomEntriesFromAssembly(assembly);
+    if (bomEntries.length === 0) {
+      _disposeAllModels();
+      skipCount++;
+      continue;
+    }
+
+    for (let ci = 0; ci < bomEntries.length; ci++) {
+      const entry = bomEntries[ci];
+
+      statusBar.textContent =
+        '位置图 [' + (fi + 1) + '/' + excelFiles.length + '] '
+        + tableName + ' — ' + entry.name + ' (' + (ci + 1) + '/' + bomEntries.length + ')';
+
+      try {
+        await _captureSingleComponent(outputDir, tableName, entry, ci, bodyGroup, excel.dir);
+        successCount++;
+      } catch (e) {
+        _logPipeline('捕获失败: ' + entry.name + ' — ' + (e && e.message || e));
+        skipCount++;
+      }
+      totalComponents++;
+    }
+
+    _disposeAllModels();
+  }
+
+  statusBar.textContent =
+    '批量位置图完成: ' + successCount + '/' + totalComponents + ' 组件, '
+    + skipCount + ' 跳过. 输出: ' + outputDir;
+  _logPipeline('=== 批量位置图完成 ===');
+  _logPipeline('成功: ' + successCount + ', 跳过: ' + skipCount + ', 输出: ' + outputDir);
+}
+
+async function _captureSingleComponent(outputDir, tableName, entry, index, bodyGroup, modelsDir) {
+  const partIdSet = new Set(entry.partIds);
+
+  for (const mesh of shared.meshes) {
+    mesh.visible = partIdSet.has(mesh.userData.partId);
+    if (mesh.visible && mesh.material) {
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const mat of mats) {
+        if (mat.color) mat.color.setRGB(0, 0.5, 0.75);
+        mat.needsUpdate = true;
+      }
+    }
+  }
+
+  _setBodyGroupOpacity(bodyGroup, 0.3);
+
+  sm.viewPositionCapture();
+  await new Promise(r => requestAnimationFrame(r));
+  await new Promise(r => requestAnimationFrame(r));
+
+  annot.setSingleLabel(entry.partIds, entry.name);
+  annot.show();
+  await new Promise(r => requestAnimationFrame(r));
+
+  const dataUrl = _captureAnnotatedPNGDataUrl();
+  const safeName = _sanitizeFilename(entry.name);
+  const baseFile = outputDir.replace(/\\/g, '/').replace(/\/$/, '') + '/' + tableName + '_' + safeName;
+  await window.electronAPI.saveBatchPng(dataUrl, baseFile + '.png');
+
+  annot.updatePositions();
+  const screenData = annot.getScreenData();
+  let svg;
+  try { svg = exportMgr.exportSVG(dataUrl, screenData || [], viewport.clientWidth, viewport.clientHeight, safeName + '.svg'); }
+  catch (e) { svg = _basicSvg(dataUrl, viewport.clientWidth, viewport.clientHeight); }
+  await window.electronAPI.saveBatchSvg(svg, baseFile + '.svg');
+
+  annot.clear();
+}
+
+function _captureAnnotatedPNGDataUrl() {
+  annot.draw();
+  const comp = annot.composeToCanvas(sm.renderer.domElement);
+  return comp.toDataURL('image/png');
+}
+
+function _basicSvg(dataUrl, w, h) {
+  return '<?xml version="1.0" encoding="utf-8"?>\n'
+    + '<svg version="1.1" xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">\n'
+    + '  <image href="' + dataUrl + '" x="0" y="0" width="' + w + '" height="' + h + '" />\n'
+    + '</svg>\n';
+}
+
+function _sanitizeFilename(name) {
+  return String(name || 'component').replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_').substring(0, 80);
+}
+
+function path__basename(filePath, ext) {
+  let base = filePath.replace(/\\/g, '/').split('/').pop();
+  if (ext && base.toLowerCase().endsWith(ext.toLowerCase())) {
+    base = base.substring(0, base.length - ext.length);
+  }
+  return base;
+}
+
+function _setBodyGroupOpacity(group, opacity) {
+  if (!group) return;
+  group.traverse((child) => {
+    if (child.isMesh && child.material) {
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      for (const mat of mats) {
+        mat.transparent = opacity < 1;
+        mat.opacity = opacity;
+        mat.depthWrite = opacity >= 1;
+        mat.needsUpdate = true;
+      }
+    }
+  });
+}
+
+function _buildBomEntriesFromAssembly(assembly) {
+  const bomMap = new Map();
+  if (!assembly || !assembly.parts) return [];
+  for (const part of assembly.parts) {
+    const src = part.bomSource;
+    if (!src || !src.code) continue;
+    const key = src.code;
+    if (!bomMap.has(key)) {
+      bomMap.set(key, { name: src.name || key, code: key, partIds: [] });
+    }
+    bomMap.get(key).partIds.push(part.id);
+  }
+  return Array.from(bomMap.values());
+}
+
+async function _loadModelCoreSilently(assembly, dir) {
+  _disposeAllModels();
+
+  shared.assembly = assembly;
+  shared.loaded = new Map();
+  shared.meshes = [];
+  shared.hiddenPartIds = new Set();
+  shared.checkedPartIds = new Set();
+  shared.checkedNodes = [];
+  shared.fixedPartIds = new Set();
+  shared.selectedNode = null;
+  shared.bomEntries = [];
+  _highlightedParts.length = 0;
+
+  let meshCount = 0;
+  for (const part of assembly.parts) {
+    const glbPath = _glbPath(dir, part.glbFile);
+    let exists = false;
+    try { exists = (await window.electronAPI.fileExists(glbPath)) || false; } catch (e) {}
+    if (!exists) continue;
+    const segments = glbPath.replace(/\\/g, '/').split('/');
+    const drive = (segments[0].indexOf(':') >= 0) ? segments.shift().replace(':', '') : '';
+    const pathPart = segments.map(seg => encodeURIComponent(seg)).join('/');
+    const url = drive ? ('local://' + drive.toLowerCase() + '/' + pathPart) : ('local:///' + pathPart);
+    try {
+      const data = await modelLoader.loadModel(url);
+      shared.loaded.set(part.id, { ...part, modelData: data, meshes: data.meshes });
+    } catch (e) {}
+  }
+
+  for (const [, p] of shared.loaded) {
+    for (const m of p.meshes) {
+      m.userData.partId = p.id;
+      if (p.isExplosionCenter) m.userData.isExplosionCenter = true;
+      shared.meshes.push(m);
+      meshCount++;
+      if (!m.material) {
+        m.material = new THREE.MeshStandardMaterial({ color: p.color || 0x0080c0, roughness: 0.5, metalness: 0.0, side: THREE.DoubleSide });
+      } else if (Array.isArray(m.material)) {
+        for (const mat of m.material) {
+          mat.side = THREE.DoubleSide;
+          if (mat.color && mat.color.getHex() === 0xffffff && !p.color) mat.color.set(0x0080c0);
+        }
+      } else {
+        m.material.side = THREE.DoubleSide;
+        if (m.material.color && m.material.color.getHex() === 0xffffff && !p.color) {
+          m.material.color.set(0x0080c0);
+        }
+      }
+    }
+    if (p.modelData && p.modelData.scene) {
+      if (p.transform && Array.isArray(p.transform) && p.transform.length === 16) {
+        const mat = new THREE.Matrix4();
+        mat.fromArray(p.transform);
+        p.modelData.scene.applyMatrix4(mat);
+      }
+      sm.scene.add(p.modelData.scene);
+    }
+  }
+
+  shared.groups = AssemblyLoader._buildGroups(assembly, shared.loaded);
+  shared.hierarchy = assembly.hierarchy || [];
+}
+
+function _disposeAllModels() {
+  for (const [, p] of (shared.loaded || new Map())) {
+    if (p.modelData && p.modelData.scene) {
+      sm.scene.remove(p.modelData.scene);
+      p.modelData.scene.traverse((o) => {
+        if (o.geometry) o.geometry.dispose();
+        const mats = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
+        for (const m of mats) {
+          for (const k of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'aoMap', 'specularMap']) {
+            if (m[k] && typeof m[k].dispose === 'function') m[k].dispose();
+          }
+          if (typeof m.dispose === 'function') m.dispose();
+        }
+      });
+    }
+  }
+  shared.loaded = new Map();
+  shared.meshes = [];
+  shared.assembly = null;
+}
+
 // ── Pipeline Progress ───────────────────────────────────
 
 function _logPipeline(msg) {
@@ -1455,6 +1974,18 @@ if (window.electronAPI) {
         }
         return;
       }
+      const cmpIdx = msg.indexOf('COMPARE_RESULT_JSON:');
+      if (cmpIdx >= 0) {
+        try {
+          const jsonStr = msg.slice(cmpIdx + 'COMPARE_RESULT_JSON:'.length).trim();
+          const payload = JSON.parse(jsonStr);
+          _renderCompareResult(payload);
+          statusBar.textContent = '对比完成: ' + (payload.total_pairs || 0) + ' 对';
+        } catch (e) {
+          console.warn('Failed to parse COMPARE_RESULT_JSON:', e);
+        }
+        return;
+      }
     }
     _logPipeline(msg);
   });
@@ -1470,18 +2001,23 @@ if (window.electronAPI) {
     const log = getPipelineLog();
     if (log) log.innerHTML = '';
     _logPipeline('管线启动...');
-    if (pipelineMode === 'full' || pipelineMode === 'bom-full') switchTab(2);
-    if (pipelineMode === 'clean') switchTab(4);
+    if (pipelineMode === 'full' || pipelineMode === 'bom-full') switchTab(4);
+    if (pipelineMode === 'clean') switchTab(1);
+    if (pipelineMode === 'compare') switchTab(0);
   });
-  // Serialize concurrent pipeline-complete events so double-clicks don't race.
   let _loadingChain = Promise.resolve();
   window.electronAPI.onPipelineComplete((jsonPath) => {
     _loadingChain = _loadingChain.then(async () => {
       try {
         _logPipeline('完成! ' + jsonPath);
         let targetIdx = activeTab;
-        if (pipelineMode === 'full' || pipelineMode === 'bom-full') targetIdx = 2;
-        if (pipelineMode === 'clean') targetIdx = 0;
+        if (pipelineMode === 'full' || pipelineMode === 'bom-full') targetIdx = 4;
+        if (pipelineMode === 'clean') targetIdx = 1;
+        if (pipelineMode === 'compare') {
+          targetIdx = 0;
+          statusBar.textContent = '数模对比完成';
+          return;
+        }
         await _loadPipelineResult(jsonPath, targetIdx);
         _renderBomList();
         _restoreCompoundsToTree();
@@ -1504,7 +2040,8 @@ if (window.electronAPI) {
   window.electronAPI.onMenuViewRightFront(() => sm.viewRightFront());
   window.electronAPI.onMenuViewTop(() => sm.viewTop());
   window.electronAPI.onMenuViewBottom(() => sm.viewBottom());
-  window.electronAPI.onMenuShowHelp(() => switchTab(5));
+  window.electronAPI.onMenuViewPositionCapture(() => sm.viewPositionCapture());
+  window.electronAPI.onMenuShowHelp(() => _showHelpCarousel(0));
 }
 
 // ── Startup ──────────────────────────────────────────────

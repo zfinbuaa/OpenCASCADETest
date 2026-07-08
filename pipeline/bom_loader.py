@@ -98,11 +98,28 @@ def read_bom(xlsx_path, models_dir=None):
             if stp_path is None:
                 try:
                     code_lower = code.lower()
+                    best = None
                     for entry in os.listdir(models_dir):
                         base, ext = os.path.splitext(entry)
-                        if ext.lower() in ('.stp', '.step') and base.lower() == code_lower:
+                        if ext.lower() not in ('.stp', '.step'):
+                            continue
+                        base_lower = base.lower()
+                        if base_lower == code_lower:
                             stp_path = os.path.join(models_dir, entry)
                             break
+                        if not base_lower.startswith(code_lower):
+                            continue
+                        if len(base_lower) == len(code_lower):
+                            continue
+                        sep_char = base_lower[len(code_lower)]
+                        if sep_char not in ('-', '_', '.', ' '):
+                            continue
+                        if best is None or len(base) < len(best[0]):
+                            best = (base, entry)
+
+                    if stp_path is None and best is not None:
+                        logger.info("prefix match '%s' -> '%s'", code, best[0])
+                        stp_path = os.path.join(models_dir, best[1])
                 except OSError:
                     pass
 

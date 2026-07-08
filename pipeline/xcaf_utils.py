@@ -16,7 +16,7 @@ from OCC.Core.XCAFDoc import (
     XCAFDoc_DocumentTool,
     XCAFDoc_ShapeTool,
 )
-from OCC.Core.TDF import TDF_LabelSequence, TDF_AttributeIterator
+from OCC.Core.TDF import TDF_LabelSequence
 from OCC.Core.TDataStd import TDataStd_Name
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.BRepGProp import brepgprop
@@ -32,30 +32,47 @@ logger = logging.getLogger(__name__)
 
 
 def get_shape_name(label, shape_tool):
-    """Get the name of a shape label using TDataStd_Name API."""
+    """Get the name of a shape label from its TDataStd_Name attribute.
+
+    Uses label.GetLabelName() which reads TDataStd_Name internally
+    and correctly preserves Unicode chars (including CJK names from
+    STEP \\X2\\...\\X0\\ encoding). Avoids attr.Dump() whose text
+    output garbles non-ASCII characters.
+
+    If the label itself has no name, checks parent and child labels
+    because OCCT XCAF may store PRODUCT names on a different label
+    than the SHAPE_REPRESENTATION label returned by GetComponents().
+    """
     try:
-        guid = TDataStd_Name.GetID()
-        if label.IsAttribute(guid):
-            it = TDF_AttributeIterator(label)
-            while it.More():
-                attr = it.Value()
-                if attr.ID() == guid:
-                    try:
-                        dump_output = attr.Dump()
-                        if isinstance(dump_output, tuple) and len(dump_output) >= 2:
-                            s = str(dump_output[1])
-                            if "Name=|" in s:
-                                start = s.index("Name=|") + 6
-                                end = s.index("|", start)
-                                name = s[start:end]
-                                if name:
-                                    return name
-                    except Exception:
-                        pass
-                    break
-                it.Next()
+        name = label.GetLabelName()
+        if name and name.strip():
+            return name
     except Exception:
         pass
+
+    try:
+        father = label.Father()
+        if father and not father.IsNull():
+            name = father.GetLabelName()
+            if name and name.strip():
+                return name
+    except Exception:
+        pass
+
+    try:
+        child_seq = TDF_LabelSequence()
+        label.FindChildren(child_seq)
+        for i in range(child_seq.Length()):
+            child = child_seq.Value(i + 1)
+            try:
+                name = child.GetLabelName()
+                if name and name.strip():
+                    return name
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     return "Part_{}".format(label.Tag())
 
 def set_shape_name(label, name):
@@ -405,3 +422,131 @@ def get_tree_stats(roots):
         "shape_nodes": shape_nodes,
         "assembly_nodes": assembly_nodes,
     }
+
+
+def diagnose_assembly_tree(doc):
+    """
+    Walk the XCAF assembly tree and collect diagnostic stats.
+
+    Mirrors the traversal logic of extract_assembly_tree() but
+    instead of building a full node dict, collects lightweight
+    statistics: depth distribution, shape type counts, and the
+    list of nodes that would be misclassified (COMPOUND with
+    IsAssembly=False — these get _S001 splitting).
+
+    Returns:
+        dict with keys:
+            total_nodes, assembly_nodes, compound_nodes,
+            misclassified_compounds, depth_distribution,
+            shape_type_distribution, misclassified_details.
+    """
+    shape_tool = XCAFDoc_DocumentTool.ShapeTool(doc.Main())
+
+    diag = {
+        "total_nodes": 0,
+        "assembly_nodes": 0,
+        "compound_nodes": 0,
+        "misclassified_compounds": 0,
+        "depth_distribution": {},
+        "shape_type_distribution": {},
+        "misclassified_details": [],
+    }
+    _MAX_DETAIL = 200
+
+    def _incr(d, k):
+        s = str(k)
+        d[s] = d.get(s, 0) + 1
+
+    TOPABS_NAME = {0: "COMPOUND", 1: "COMPSOLID", 2: "SOLID",
+                   3: "SHELL", 4: "FACE", 5: "WIRE", 6: "EDGE",
+                   7: "VERTEX", 8: "SHAPE"}
+
+    def _st_name(st):
+        try:
+            return TOPABS_NAME.get(int(st), "TYPE_%d" % int(st))
+        except Exception:
+            return "NONE"
+
+    def _entry(label):
+        try:
+            return str(label.EntryDump())
+        except Exception:
+            return "?"
+
+    def walk(label, depth=0, ancestor_names=None):
+        if ancestor_names is None:
+            ancestor_names = []
+
+        diag["total_nodes"] += 1
+        _incr(diag["depth_distribution"], depth)
+
+        name = get_shape_name(label, shape_tool)
+
+        has_children = shape_tool.IsAssembly(label)
+        shape = shape_tool.GetShape(label)
+
+        st = "NONE"
+        if shape is not None and not shape.IsNull():
+            st = _st_name(shape.ShapeType())
+        _incr(diag["shape_type_distribution"], st)
+
+        is_compound = (not has_children and shape is not None
+                       and shape.ShapeType() == TopAbs_COMPOUND)
+
+        if has_children:
+            diag["assembly_nodes"] += 1
+
+        if is_compound:
+            diag["compound_nodes"] += 1
+
+        # Count solids in the shape
+        solid_count = 0
+        if shape is not None and not shape.IsNull():
+            try:
+                exp = TopExp_Explorer(shape, TopAbs_SOLID)
+                while exp.More():
+                    solid_count += 1
+                    exp.Next()
+            except Exception:
+                pass
+
+        # Check for sub-shapes
+        sub_count = 0
+        try:
+            sub_seq = TDF_LabelSequence()
+            shape_tool.GetSubShapes(label, sub_seq)
+            sub_count = sub_seq.Length()
+        except Exception:
+            pass
+
+        # Record misclassified compound nodes
+        if is_compound and solid_count > 0:
+            diag["misclassified_compounds"] += 1
+            if len(diag["misclassified_details"]) < _MAX_DETAIL:
+                path_str = " / ".join(
+                    (ancestor_names + [name])[-3:])  # last 3 ancestors
+                diag["misclassified_details"].append({
+                    "entry": _entry(label),
+                    "name": name[:80],
+                    "depth": depth,
+                    "solid_count": solid_count,
+                    "sub_shape_count": sub_count,
+                    "path": path_str,
+                })
+
+        # Recurse
+        if has_children:
+            child_seq = TDF_LabelSequence()
+            shape_tool.GetComponents(label, child_seq)
+            for i in range(child_seq.Length()):
+                child_label = child_seq.Value(i + 1)
+                walk(child_label, depth + 1, ancestor_names + [name])
+
+    free_shapes = TDF_LabelSequence()
+    shape_tool.GetFreeShapes(free_shapes)
+
+    for i in range(free_shapes.Length()):
+        root_label = free_shapes.Value(i + 1)
+        walk(root_label, depth=0)
+
+    return diag

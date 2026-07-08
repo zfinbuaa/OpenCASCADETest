@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 
 AABB_PADDING = 0.5
 INTERFERENCE_THRESHOLD = 0.03
-DEDUP_SIMILARITY_THRESHOLD = 0.99
 
 
 def _compute_aabb(shape):
@@ -66,45 +65,57 @@ def _compute_interference_volume(shape_a, shape_b):
         return props.Mass()
 
 
-def _mesh_to_sampled_points(shape, max_points=3000):
-    from pipeline.mesher import brep_to_mesh
-    try:
-        verts, tris, _ = brep_to_mesh(shape, linear_deflection=2.0)
-        if len(verts) < 9:
-            return None
-        v = np.array(verts, dtype=np.float64).reshape(-1, 3)
-        if len(v) > max_points:
-            indices = np.random.choice(len(v), max_points, replace=False)
-            v = v[indices]
-        return v
-    except Exception:
-        return None
+def _compute_centroid(shape):
+    with OCC_BREP_LOCK:
+        props = GProp_GProps()
+        brepgprop.VolumeProperties(shape, props)
+        if props.Mass() > 1e-12:
+            c = props.CentreOfMass()
+            return np.array([c.X(), c.Y(), c.Z()])
+        brepgprop.SurfaceProperties(shape, props)
+        c = props.CentreOfMass()
+        return np.array([c.X(), c.Y(), c.Z()])
 
 
-def _compare_shape_similarity(verts_a, verts_b, centroid_a, centroid_b, position_tolerance=1.0):
-    if verts_a is None or verts_b is None:
-        return 0.0
-    if len(verts_a) < 3 or len(verts_b) < 3:
-        return 0.0
+def _apply_transform_to_point(point_xyz, transform):
+    if transform is None or len(transform) != 16:
+        return point_xyz
+    p = np.append(point_xyz, 1.0)
+    m = np.array(transform, dtype=np.float64).reshape(4, 4, order='F')
+    r = m @ p
+    return r[:3]
 
-    delta = np.linalg.norm(centroid_a - centroid_b)
-    if delta > position_tolerance:
-        return 0.0
 
-    n_a = len(verts_a)
-    n_b = len(verts_b)
+DEDUP_POSITION_TOLERANCE_MM = 5.0
+DEDUP_VOLUME_RATIO_MIN = 0.99
+DEDUP_NEAR_MISS_AABB_DIM_MM = 5.0
 
-    if min(n_a, n_b) / max(n_a, n_b) < 0.8:
-        return 0.0
 
-    if n_a <= n_b:
-        src, dst = verts_a, verts_b
-    else:
-        src, dst = verts_b, verts_a
+def _shapes_equivalent(shape_a, shape_b, aabb_a, aabb_b,
+                       centroid_a, centroid_b, vol_a, vol_b):
+    if aabb_a is None or aabb_b is None:
+        return False, "aabb_none"
 
-    diff = np.linalg.norm(src - dst[:len(src)], axis=1)
-    matched = np.sum(diff < 2.0)
-    return matched / len(src)
+    dim_a = aabb_a[1] - aabb_a[0]
+    dim_b = aabb_b[1] - aabb_b[0]
+    dim_diff = np.abs(dim_a - dim_b)
+    max_dim_diff = float(np.max(dim_diff))
+    if max_dim_diff > DEDUP_POSITION_TOLERANCE_MM:
+        return False, "aabb_dim:%s" % ",".join("%.1f" % v for v in dim_diff)
+
+    centroid_delta = -1.0
+    if centroid_a is not None and centroid_b is not None:
+        centroid_delta = float(np.linalg.norm(centroid_a - centroid_b))
+        if centroid_delta > DEDUP_POSITION_TOLERANCE_MM:
+            return False, "centroid:%.2f" % centroid_delta
+
+    volume_ratio = 1.0
+    if vol_a > 1e-12 and vol_b > 1e-12:
+        volume_ratio = min(vol_a, vol_b) / max(vol_a, vol_b)
+        if volume_ratio < DEDUP_VOLUME_RATIO_MIN:
+            return False, "vol_ratio:%.4f" % volume_ratio
+
+    return True, "ok"
 
 
 def clean_model(stp_path, xlsx_path, output_dir, export_step=False, log_fn=None):
@@ -141,6 +152,18 @@ def clean_model(stp_path, xlsx_path, output_dir, export_step=False, log_fn=None)
     if len(parts) == 0:
         _log("ERROR: 无零件")
         return 1
+
+    from pipeline.xcaf_utils import diagnose_assembly_tree
+    diag = diagnose_assembly_tree(doc)
+    _log("  Assembly节点: {}  |  Compound节点: {}  |  误判Compound: {}".format(
+        diag["assembly_nodes"], diag["compound_nodes"],
+        diag["misclassified_compounds"]))
+    _log("  深度分布: {}".format(
+        ", ".join("d{}={}".format(k, diag["depth_distribution"][k])
+                  for k in sorted(diag["depth_distribution"].keys(), key=int))))
+    if diag["misclassified_compounds"] > 0:
+        _log("  WARNING: 有 {} 个节点被误判为Compound, 层级可能丢失".format(
+            diag["misclassified_compounds"]))
 
     # ── Step 1: J-column matching ───────────────────────────
     _log("")
@@ -226,30 +249,45 @@ def clean_model(stp_path, xlsx_path, output_dir, export_step=False, log_fn=None)
 
     # ── Step 3: Shape+position deduplication ────────────────
     _log("")
-    _log("[Step 3] 形状+位置去重 (阈值: {}% 相似度)...".format(int(DEDUP_SIMILARITY_THRESHOLD * 100)))
+    _log("[Step 3] 形状+位置去重 (AABB + 质心 + 体积比例)...")
 
     all_kept = keep_step1 | keep_step2
+    if not all_kept:
+        _log("  无BOM匹配, 将对全部 {} 个零件进行形状+位置去重".format(len(parts)))
+        all_kept = set(range(len(parts)))
     kept_list = sorted(all_kept)
     _log("  当前保留总数: {}".format(len(kept_list)))
 
+    aabbs = []
     centroids = []
-    sampled_vertices = []
+    volumes = []
 
-    for i in kept_list:
+    for idx in kept_list:
+        shape = parts[idx]["shape"]
+        xform = parts[idx].get("transform")
         try:
-            shape = parts[i]["shape"]
-            v = _mesh_to_sampled_points(shape)
-            sampled_vertices.append(v)
-            if v is not None and len(v) > 0:
-                centroids.append(v.mean(axis=0))
-            else:
-                centroids.append(np.zeros(3))
+            aabbs.append(_compute_aabb(shape))
         except Exception:
-            sampled_vertices.append(None)
-            centroids.append(np.zeros(3))
+            aabbs.append(None)
+        try:
+            local_centroid = _compute_centroid(shape)
+            if local_centroid is not None and xform is not None:
+                centroids.append(_apply_transform_to_point(local_centroid, xform))
+            else:
+                centroids.append(local_centroid)
+        except Exception:
+            centroids.append(None)
+        try:
+            volumes.append(_compute_volume(shape))
+        except Exception:
+            volumes.append(0.0)
 
     removed_by_dedup = set()
     n = len(kept_list)
+    checked = 0
+    fail_reasons = {}
+    near_misses = []
+    aabb_diff_buckets = [0] * 6
 
     for i_idx in range(n):
         if kept_list[i_idx] in removed_by_dedup:
@@ -258,13 +296,87 @@ def clean_model(stp_path, xlsx_path, output_dir, export_step=False, log_fn=None)
             if kept_list[j_idx] in removed_by_dedup:
                 continue
 
-            sim = _compare_shape_similarity(
-                sampled_vertices[i_idx], sampled_vertices[j_idx],
+            checked += 1
+            if checked % 500 == 0:
+                _log("  去重检查: {}/{} 对 (已移除 {})".format(
+                    checked, n * (n - 1) // 2, len(removed_by_dedup)))
+
+            eq, reason = _shapes_equivalent(
+                parts[kept_list[i_idx]]["shape"],
+                parts[kept_list[j_idx]]["shape"],
+                aabbs[i_idx], aabbs[j_idx],
                 centroids[i_idx], centroids[j_idx],
+                volumes[i_idx], volumes[j_idx],
             )
 
-            if sim >= DEDUP_SIMILARITY_THRESHOLD:
+            if eq:
                 removed_by_dedup.add(kept_list[j_idx])
+            else:
+                kind = reason.split(":")[0]
+                fail_reasons[kind] = fail_reasons.get(kind, 0) + 1
+
+                if centroids[i_idx] is not None and centroids[j_idx] is not None:
+                    cd = float(np.linalg.norm(
+                        centroids[i_idx] - centroids[j_idx]))
+                else:
+                    cd = -1.0
+
+                if aabbs[i_idx] is not None and aabbs[j_idx] is not None:
+                    dim_i = aabbs[i_idx][1] - aabbs[i_idx][0]
+                    dim_j = aabbs[j_idx][1] - aabbs[j_idx][0]
+                    dim_diff = np.abs(dim_i - dim_j)
+                    max_ad = float(np.max(dim_diff))
+                else:
+                    max_ad = -1.0
+                    dim_diff = None
+
+                vr = 1.0
+                if volumes[i_idx] > 1e-12 and volumes[j_idx] > 1e-12:
+                    vr = min(volumes[i_idx], volumes[j_idx]) / max(
+                        volumes[i_idx], volumes[j_idx])
+
+                if cd >= 0 and max_ad >= 0 and max_ad <= DEDUP_NEAR_MISS_AABB_DIM_MM:
+                    near_misses.append((
+                        max_ad, cd, vr, reason,
+                        part_names[kept_list[i_idx]],
+                        part_names[kept_list[j_idx]],
+                        dim_diff,
+                    ))
+
+                if kind == "aabb_dim" and max_ad >= 0:
+                    if max_ad < 1:
+                        aabb_diff_buckets[0] += 1
+                    elif max_ad < 2:
+                        aabb_diff_buckets[1] += 1
+                    elif max_ad < 3:
+                        aabb_diff_buckets[2] += 1
+                    elif max_ad < 5:
+                        aabb_diff_buckets[3] += 1
+                    elif max_ad < 10:
+                        aabb_diff_buckets[4] += 1
+                    else:
+                        aabb_diff_buckets[5] += 1
+
+    _log("  检查对数: {} | 去重移除: {}".format(checked, len(removed_by_dedup)))
+    if fail_reasons:
+        _log("  失败原因分布: {}".format(
+            ", ".join("{}={}".format(k, v)
+                       for k, v in sorted(fail_reasons.items(),
+                                          key=lambda x: -x[1]))))
+    if any(aabb_diff_buckets):
+        _log("  AABB尺寸差分布: <1mm={} 1-2mm={} 2-3mm={} 3-5mm={} 5-10mm={} >10mm={}".format(
+            *aabb_diff_buckets))
+
+    if near_misses:
+        near_misses.sort(key=lambda x: (x[1], x[0]))
+        _log("  最近似对 Top 20 (AABB差<{}mm):".format(
+            DEDUP_NEAR_MISS_AABB_DIM_MM))
+        for max_ad, cd, vr, reason, na, nb, dd in near_misses[:20]:
+            dd_str = "(%s)" % ",".join("%.1f" % v for v in dd) if dd is not None else ""
+            _log("    aabb=%.2fmm cent=%.2fmm vol=%.2f%% %s [%s] %s vs %s" % (
+                max_ad, cd, vr * 100, dd_str, reason, na, nb))
+
+    _log("  去重移除: {} 个".format(len(removed_by_dedup)))
 
     final_kept = all_kept - removed_by_dedup
     final_removed = set(range(len(parts))) - final_kept

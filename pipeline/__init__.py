@@ -38,3 +38,6 @@ from .explosion_planner import build_explosion_plan
 
 # Phase 4: Model cleaning
 from .model_cleaner import clean_model
+
+# Phase 5: Model comparison
+from .model_comparator import compare_assemblies, read_compare_xlsx

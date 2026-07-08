@@ -38,6 +38,9 @@ export class ExplosionView {
 
     this.onClearHighlight = null;
 
+    this._lastExplosionCenter = null;
+    this._lastCompounds = null;
+
     this._transformCtrl = new TransformControls(camera, domElement);
     this._transformCtrl.enabled = false;
     this._transformCtrl.addEventListener('dragging-changed', (e) => {
@@ -255,6 +258,56 @@ export class ExplosionView {
     return new THREE.Vector3(0, 1, 0);
   }
 
+  _buildCompoundMap(compounds) {
+    const map = new Map();
+    if (compounds && compounds.length > 0) {
+      for (const c of compounds) {
+        for (const m of c.members) map.set(m, c.name);
+      }
+    }
+    return map;
+  }
+
+  _doRadialExplode(centerPoint, distance, compounds) {
+    const compoundMap = this._buildCompoundMap(compounds);
+    const units = new Map();
+    for (const g of this.assemblyGroups) {
+      for (const mesh of g.meshes) {
+        if (this._isFixedMesh(mesh)) continue;
+        if (this._isExplosionCenter(mesh)) continue;
+        if (!mesh.visible) continue;
+        const wp = this.originalPositions.get(mesh);
+        if (!wp) continue;
+        const pid = mesh.userData.partId;
+        const key = (pid && compoundMap.has(pid)) ? 'CMP_' + compoundMap.get(pid) : '_SOLO_' + (g.id || Math.random());
+        if (!units.has(key)) units.set(key, { meshes: [], ctr: new THREE.Vector3() });
+        const u = units.get(key);
+        u.meshes.push(mesh);
+        u.ctr.add(wp);
+      }
+    }
+    if (units.size === 0) return;
+    for (const [, u] of units) {
+      u.ctr.divideScalar(u.meshes.length);
+      u.dist = u.ctr.distanceTo(centerPoint);
+    }
+    const allDists = [];
+    for (const [, u] of units) { allDists.push(u.dist); }
+    const maxDist = Math.max(...allDists, 1);
+    for (const [, u] of units) {
+      const rawDir = u.ctr.clone().sub(centerPoint);
+      const d = rawDir.length();
+      const dir = d < 0.01 ? new THREE.Vector3(0, 1, 0) : rawDir.normalize();
+      const distFactor = 1.0 + (u.dist / maxDist) * 0.5;
+      const offset = dir.multiplyScalar(distance * distFactor);
+      for (const mesh of u.meshes) {
+        const origin = this.originalPositions.get(mesh).clone();
+        this._applyWorldOffset(mesh, offset);
+        this.explodedPositions.set(mesh, origin.clone().add(offset));
+      }
+    }
+  }
+
   // ── Explode / Reset ─────────────────────────────
 
   async explodeGroupsAnimated(duration = 600) {
@@ -350,68 +403,33 @@ export class ExplosionView {
     });
   }
 
-  setExplosionDistance(dist) { this.explosionDistance = dist; }
+  setExplosionDistance(dist) {
+    const prev = this.explosionDistance;
+    this.explosionDistance = dist;
+    if (this.isExploded && this._lastExplosionCenter && dist !== prev) {
+      this.resetPositions();
+      if (this._lastCompounds != null) {
+        this._doRadialExplode(this._lastExplosionCenter, dist, this._lastCompounds);
+      }
+    }
+  }
 
   // ── Radial Explosion (center-outward, independent of pipeline) ─
 
   radialExplodeInstant(centerPoint, distance, compounds) {
-    if (this.assemblyGroups.length === 0) return;
+    if (this.assemblyGroups.length === 0) { this._setStatus('无装配数据，请先加载模型'); return; }
+    this._lastExplosionCenter = centerPoint.clone();
+    this._lastCompounds = compounds || [];
     this.resetPositions();
-    const compoundMap = new Map();
-    if (compounds && compounds.length > 0) {
-      for (const c of compounds) {
-        for (const m of c.members) compoundMap.set(m, c.name);
-      }
-    }
-    const units = new Map();
-    for (const g of this.assemblyGroups) {
-      for (const mesh of g.meshes) {
-        if (this._isFixedMesh(mesh)) continue;
-        if (this._isExplosionCenter(mesh)) continue;
-        if (!mesh.visible) continue;
-        const wp = this.originalPositions.get(mesh);
-        if (!wp) continue;
-        const pid = mesh.userData.partId;
-        const key = (pid && compoundMap.has(pid)) ? 'CMP_' + compoundMap.get(pid) : '_SOLO_' + (g.id || Math.random());
-        if (!units.has(key)) units.set(key, { meshes: [], ctr: new THREE.Vector3() });
-        const u = units.get(key);
-        u.meshes.push(mesh);
-        u.ctr.add(wp);
-      }
-    }
-    if (units.size === 0) return;
-    const allDists = [];
-    for (const [, u] of units) {
-      u.ctr.divideScalar(u.meshes.length);
-      u.dist = u.ctr.distanceTo(centerPoint);
-      allDists.push(u.dist);
-    }
-    const maxDist = Math.max(...allDists, 1);
-    for (const [, u] of units) {
-      const rawDir = u.ctr.clone().sub(centerPoint);
-      const d = rawDir.length();
-      const dir = d < 0.01 ? new THREE.Vector3(0, 1, 0) : rawDir.normalize();
-      const distFactor = 1.0 + (u.dist / maxDist) * 0.5;
-      const offset = dir.multiplyScalar(distance * distFactor);
-      for (const mesh of u.meshes) {
-        const origin = this.originalPositions.get(mesh).clone();
-        this._applyWorldOffset(mesh, offset);
-        this.explodedPositions.set(mesh, origin.clone().add(offset));
-      }
-    }
+    this._doRadialExplode(centerPoint, distance, compounds);
     this.isExploded = true;
-    this._setStatus('径向爆炸完成');
+    this._setStatus('爆炸完成');
   }
 
   async radialExplodeAnimated(centerPoint, distance, duration, compounds) {
     if (this.assemblyGroups.length === 0) return;
     this.resetPositions();
-    const compoundMap = new Map();
-    if (compounds && compounds.length > 0) {
-      for (const c of compounds) {
-        for (const m of c.members) compoundMap.set(m, c.name);
-      }
-    }
+    const compoundMap = this._buildCompoundMap(compounds);
     const units = new Map();
     for (const g of this.assemblyGroups) {
       for (const mesh of g.meshes) {
@@ -480,18 +498,24 @@ export class ExplosionView {
     return n > 0 ? c.divideScalar(n) : new THREE.Vector3();
   }
 
-  findCenterPoint(centerNodeId) {
+  findCenterPoint(centerNodeId, hierarchyMap = null) {
     if (!centerNodeId) return this._computeSceneCenter();
+
+    let targetPartIds;
+    if (hierarchyMap && hierarchyMap.has(centerNodeId)) {
+      targetPartIds = new Set(hierarchyMap.get(centerNodeId));
+    } else {
+      targetPartIds = new Set([centerNodeId]);
+    }
+
     let c = new THREE.Vector3();
     let n = 0;
     for (const g of this.assemblyGroups) {
       for (const mesh of g.meshes) {
         const pid = mesh.userData.partId;
-        if (!pid) continue;
-        if (pid === centerNodeId || pid.startsWith(centerNodeId)) {
-          const wp = this.originalPositions.get(mesh);
-          if (wp) { c.add(wp); n++; }
-        }
+        if (!pid || !targetPartIds.has(pid)) continue;
+        const wp = this.originalPositions.get(mesh);
+        if (wp) { c.add(wp); n++; }
       }
     }
     return n > 0 ? c.divideScalar(n) : this._computeSceneCenter();

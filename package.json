@@ -20,6 +20,10 @@
       {
         "from": "dist/AutoModel",
         "to": "pipeline"
+      },
+      {
+        "from": "help-images",
+        "to": "help-images"
       }
     ],
     "files": [

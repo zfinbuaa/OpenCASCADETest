@@ -47,6 +47,7 @@ a = Analysis(
         'pipeline._occ_lock',
         'pipeline.compound_utils',
         'pipeline.model_cleaner',
+        'pipeline.model_comparator',
         'numpy',
         'openpyxl',
         'trimesh',

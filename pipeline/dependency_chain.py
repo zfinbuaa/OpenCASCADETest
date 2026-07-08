@@ -192,6 +192,49 @@ def _simulate_dir_blockers(target_name, part_map, all_part_names,
             float(result.get("max_safe_distance", 0.0)))
 
 
+def _find_static_blockers(target_name, part_map, avail_names,
+                           target_volume=None, min_ratio=0.05):
+    """Find parts that statically block the target via volume interference.
+
+    Detects insert-type interference (bolt in hole, connector in socket) where
+    a part overlaps significantly with the target at rest. Returns parts that
+    must be removed before the target can move, regardless of direction.
+
+    Args:
+        target_name: name of the target part.
+        part_map: dict of name -> part dict with 'shape'.
+        avail_names: list of candidate obstacle part names to check.
+        target_volume: precomputed volume of target (optional).
+        min_ratio: interference_volume / min(vol_a, vol_b) threshold.
+
+    Returns:
+        list[str]: names of parts that statically block the target.
+    """
+    from pipeline.collision_check import has_static_insert_interference
+
+    target_shape = part_map[target_name]["shape"]
+    if target_shape is None:
+        return []
+
+    blockers = []
+    for name in avail_names:
+        p = part_map.get(name)
+        if p is None or p.get("shape") is None:
+            continue
+        try:
+            blocking, _ratio = has_static_insert_interference(
+                target_shape, p["shape"],
+                target_volume=target_volume,
+                min_ratio=min_ratio)
+        except Exception:
+            continue
+        if blocking:
+            blockers.append(name)
+
+    blockers.sort(key=lambda n: len(n))
+    return blockers
+
+
 def _find_optimal_direction(target_name, part_map, all_part_names,
                              verified_dirs, collision_data, max_distance,
                              chain_set, skip_set, depth, max_depth,
@@ -267,14 +310,22 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
     preferred_dir = verified_dirs.get(target_name, [0, 1, 0])
 
     avail_names = list(avail_key)
+
+    # ── Level 1: Static insert-interference detection ──
+    static_blockers = _find_static_blockers(
+        target_name, part_map, avail_names, min_ratio=0.05)
+    static_blocker_set = set(static_blockers)
+    remaining_names = [n for n in avail_names if n not in static_blocker_set]
+
     if sub_assemblies:
         obstacles = filter_obstacles_by_compound_bbox(
-            target_name, target_shape, avail_names, part_map,
+            target_name, target_shape, remaining_names, part_map,
             sub_assemblies, collision_data, max_distance,
             sa_bbox_cache=sa_bbox_cache)
     else:
-        obstacles = [(n, part_map[n]["shape"]) for n in avail_names]
+        obstacles = [(n, part_map[n]["shape"]) for n in remaining_names]
 
+    # ── Level 2: Direction-based path search ──
     sweep = find_all_blockers(
         target_name, target_shape, obstacles, preferred_dir,
         max_distance, collision_data, max_directions=8,
@@ -296,19 +347,23 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
         for fd in feasible_dirs[:_BEAM_K]:
             considered_summary.append({
                 "direction": fd["direction"],
-                "blockers_count": 0,
-                "chain_cost": 1,
+                "blockers_count": len(static_blockers),
+                "chain_cost": 1 + len(static_blockers),
                 "selected": fd is chosen,
             })
         result = {
             "feasible": True,
             "direction": chosen["direction"],
-            "blockers": [],
-            "cost": 1,
-            "chain_depth": 1,
+            "blockers": static_blockers,
+            "cost": 1 + len(static_blockers),
+            "chain_depth": 1 + len(static_blockers),
             "safe_distance": float(chosen.get("safe_distance", 0)),
             "considered": considered_summary,
+            "static_blockers": static_blockers,
         }
+        if static_blockers:
+            result["note"] = "direction feasible but {} static blocker(s) must be removed first: {}".format(
+                len(static_blockers), static_blockers[:5])
         sim_cache[cache_key] = result
         _in_progress.discard(target_name)
         return result
@@ -339,10 +394,15 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
 
     if not candidates:
         result = {
-            "feasible": False, "direction": preferred_dir, "blockers": [],
-            "cost": 1, "chain_depth": 1, "safe_distance": 0.0,
-            "considered": [], "deadlock": True,
+            "feasible": False, "direction": preferred_dir,
+            "blockers": static_blockers,
+            "cost": 1 + len(static_blockers), "chain_depth": 1 + len(static_blockers),
+            "safe_distance": 0.0, "considered": [], "deadlock": not static_blockers,
+            "static_blockers": static_blockers,
         }
+        if static_blockers:
+            result["note"] = "no feasible direction, but {} static blocker(s) identified: {}".format(
+                len(static_blockers), static_blockers[:5])
         sim_cache[cache_key] = result
         _in_progress.discard(target_name)
         return result
@@ -454,11 +514,12 @@ def _find_optimal_direction(target_name, part_map, all_part_names,
     result = {
         "feasible": False,
         "direction": best["direction"],
-        "blockers": best["blockers"],
-        "cost": best["cost"],
-        "chain_depth": best["chain_depth"],
+        "blockers": static_blockers + best["blockers"],
+        "cost": best["cost"] + len(static_blockers),
+        "chain_depth": best["chain_depth"] + len(static_blockers),
         "safe_distance": best["safe_distance"],
         "considered": considered_summary,
+        "static_blockers": static_blockers,
     }
     sim_cache[cache_key] = result
     _in_progress.discard(target_name)

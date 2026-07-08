@@ -402,6 +402,74 @@ def _has_interference_brep(moved_shape, obstacle_shape, moved_volume):
     return ratio > 0.001
 
 
+def has_static_insert_interference(target_shape, obstacle_shape,
+                                    target_volume=None, obstacle_volume=None,
+                                    min_ratio=0.05):
+    """Detect insert-type interference (e.g. bolt in hole) via static boolean intersection.
+
+    Unlike swept-collision which checks movement paths, this checks whether two
+    parts already occupy overlapping volume in their REST position. A small part
+    partially embedded in a larger part (insert interference, e.g. bolt, connector)
+    will have a high interference volume ratio. Two parts merely touching or
+    overlapping by a few microns (CAD tolerance artifacts) will have a negligible
+    ratio and are NOT flagged.
+
+    Args:
+        target_shape: TopoDS_Shape of the target part.
+        obstacle_shape: TopoDS_Shape of the obstacle part.
+        target_volume: precomputed volume of target_shape (optional, computed if None).
+        obstacle_volume: precomputed volume of obstacle_shape (optional, computed if None).
+        min_ratio: minimum VI / min(vol_a, vol_b) to be considered insert-type.
+
+    Returns:
+        tuple: (blocking: bool, ratio: float)
+            blocking: True if ratio >= min_ratio.
+            ratio: interference_volume / min(target_volume, obstacle_volume).
+    """
+    from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Common
+    from OCC.Core.Bnd import Bnd_Box
+    from OCC.Core.BRepBndLib import brepbndlib
+
+    # Quick AABB check first
+    a_bbox = Bnd_Box()
+    brepbndlib.Add(target_shape, a_bbox)
+    b_bbox = Bnd_Box()
+    brepbndlib.Add(obstacle_shape, b_bbox)
+    if a_bbox.IsVoid() or b_bbox.IsVoid():
+        return False, 0.0
+    ax0, ay0, az0, ax1, ay1, az1 = a_bbox.Get()
+    bx0, by0, bz0, bx1, by1, bz1 = b_bbox.Get()
+    if ax1 < bx0 or bx1 < ax0 or ay1 < by0 or by1 < ay0 or az1 < bz0 or bz1 < az0:
+        return False, 0.0
+
+    # Compute volumes lazily
+    if target_volume is None:
+        target_volume = _compute_volume(target_shape)
+    if obstacle_volume is None:
+        obstacle_volume = _compute_volume(obstacle_shape)
+
+    min_vol = min(target_volume, obstacle_volume)
+    if min_vol < 1e-12:
+        return False, 0.0
+
+    # Boolean intersection
+    try:
+        with OCC_BREP_LOCK:
+            common = BRepAlgoAPI_Common(target_shape, obstacle_shape)
+            common.Build()
+            if not common.IsDone():
+                return False, 0.0
+            result = common.Shape()
+            if result.IsNull():
+                return False, 0.0
+            vi = _compute_volume(result)
+    except Exception:
+        return False, 0.0
+
+    ratio = vi / min_vol
+    return ratio >= min_ratio, ratio
+
+
 def check_disassembly_path(part_name, part_shape, other_shapes, direction,
                            max_distance=100.0, steps=20,
                            collision_data=None,

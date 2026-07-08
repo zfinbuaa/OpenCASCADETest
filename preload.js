@@ -47,6 +47,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Import a new body shell from STP → converts to .glb. */
   importBody: () => ipcRenderer.invoke('import-body'),
 
+  /** Import body from known STP path (no dialog). */
+  importBodyFromPath: (stpPath) => ipcRenderer.invoke('import-body-from-path', stpPath),
+
   /** Run pipeline scoped to a specific sub-assembly node. */
   runPipelineForNode: (rootNode) => ipcRenderer.invoke('run-pipeline-for-node', rootNode),
   /** Run pipeline for node using cached STP path (no file dialog). */
@@ -78,6 +81,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   /** Run model cleaning pipeline (STP + XLSX → clean assembly). */
   runCleanPipeline: () => ipcRenderer.invoke('run-clean-pipeline'),
+
+  /** Run model comparison pipeline (XLSX Sheet3 → comparison report). */
+  runComparePipeline: () => ipcRenderer.invoke('run-compare-pipeline'),
 
   // ── Pipeline ──────────────────────────────────────────
 
@@ -122,6 +128,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Menu: View > 仰视 */
   onMenuViewBottom: (callback) => exclusiveOn('menu-view-bottom', callback),
 
+  /** Menu: View > 位置图截取视角 */
+  onMenuViewPositionCapture: (callback) => exclusiveOn('menu-view-position-capture', callback),
+
   /** Menu: Export > Screenshot */
   onMenuScreenshot: (callback) => exclusiveOn('menu-screenshot', callback),
 
@@ -130,6 +139,35 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   /** Menu: Help > About */
   onMenuShowHelp: (callback) => exclusiveOn('menu-show-help', callback),
+
+  /** Batch position capture: open 3 dialogs */
+  selectBatchPositionFiles: () => ipcRenderer.invoke('select-batch-position-files'),
+
+  /** Run BOM preview pipeline with cached paths (invoke, returns jsonPath) */
+  runBomPreviewPipelineCached: (bomPath, modelsDir) =>
+    ipcRenderer.invoke('run-bom-preview-cached', bomPath, modelsDir),
+
+  /** Save PNG to disk without dialog */
+  saveBatchPng: (dataUrl, filePath) => {
+    const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
+    return ipcRenderer.invoke('save-batch-file', filePath, {
+      data: base64,
+      encoding: 'base64',
+    });
+  },
+
+  /** Save SVG string to disk without dialog */
+  saveBatchSvg: (svgString, filePath) =>
+    ipcRenderer.invoke('save-batch-svg', filePath, svgString),
+
+  /** Get help-images directory path (packaged or dev) */
+  getHelpImagesPath: () => ipcRenderer.invoke('get-help-images-path'),
+
+  /** List image files in a help-images subfolder (sorted by numeric name) */
+  listHelpImages: (folder) => ipcRenderer.invoke('list-help-images', folder),
+
+  /** Read a help image file as base64 data URL */
+  readHelpImage: (folder, filename) => ipcRenderer.invoke('read-help-image', folder, filename),
 
   // ── Cleanup ───────────────────────────────────────────
 

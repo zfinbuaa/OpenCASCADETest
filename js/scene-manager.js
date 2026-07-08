@@ -99,7 +99,7 @@ export class SceneManager {
     this._sceneRadius = diagonal / 2;
     this.controls.target.copy(center);
     const fov = this.camera.fov * Math.PI / 180;
-    const dist = this._sceneRadius / Math.tan(fov / 2) * 0.65;
+    const dist = this._sceneRadius / Math.tan(fov / 2) * 0.85;
     const dir = new THREE.Vector3(1, 1, 1).normalize();
     this.camera.position.copy(center).add(dir.multiplyScalar(dist));
     this.controls.update();
@@ -107,7 +107,7 @@ export class SceneManager {
 
   _viewFromDirection(dx, dy, dz) {
     const fov = this.camera.fov * Math.PI / 180;
-    const dist = this._sceneRadius / Math.tan(fov / 2) * 0.65;
+    const dist = this._sceneRadius / Math.tan(fov / 2) * 0.85;
     const dir = new THREE.Vector3(dx, dy, dz).normalize();
     this.camera.position.copy(this._sceneCenter).add(dir.multiplyScalar(dist));
     this.controls.target.copy(this._sceneCenter);
@@ -120,6 +120,8 @@ export class SceneManager {
   viewRightFront() { this._viewFromDirection(1, 1, 1); }
   viewTop()        { this._viewFromDirection(0, 1, 0.001); }
   viewBottom()     { this._viewFromDirection(0, -1, 0.001); }
+
+  viewPositionCapture() { this._viewFromDirection(0.5, 1.8, 0.8); }
 
   getSceneCenter() {
     const box = new THREE.Box3();

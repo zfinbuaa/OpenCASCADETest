@@ -41,6 +41,8 @@ def log(msg):
 
 
 def main():
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
     try:
         signal.signal(signal.SIGINT, _signal_handler)
         if hasattr(signal, "SIGBREAK"):
@@ -93,9 +95,23 @@ def main():
                         help="清洗模式下的 XLSX 文件路径")
     parser.add_argument("--export-step", action="store_true",
                         help="清洗模式下同时导出清洗后的 STEP 文件")
+    parser.add_argument("--diag", action="store_true",
+                        help="装配树诊断模式：输出层级误判报告 (STP only)")
+    parser.add_argument("--compare", default=None,
+                        help="数模对比模式：Excel(.xlsx)路径，Sheet3的A/B列为待对比模型代号")
+    parser.add_argument("--diff-glb", action="store_true",
+                        help="对比模式：同时生成差异颜色模型 GLB（绿=一致，黄=微小，红=显著）")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # ── Compare mode: model comparison ──
+    if args.compare:
+        return _run_compare(args)
+
+    # ── Diag mode: assembly tree diagnosis ──
+    if args.diag:
+        return _run_diag(args)
 
     # ── Clean mode: model cleaning ──
     if args.clean:
@@ -989,6 +1005,183 @@ def _run_clean(args):
         export_step=args.export_step,
         log_fn=log,
     )
+
+
+def _run_compare(args):
+    """数模对比模式: XLSX (Sheet3 A/B列) → 加载两STP → 整体对比 → 输出报告"""
+    from pipeline.model_comparator import read_compare_xlsx, compare_assemblies
+
+    compare_xlsx = args.compare
+    if not os.path.exists(compare_xlsx):
+        log("ERROR: 对比表格不存在: {}".format(compare_xlsx))
+        return 1
+
+    models_dir = args.models_dir or os.path.dirname(os.path.abspath(compare_xlsx))
+
+    log("=== 数模对比 ===")
+    log("对比表格: {}".format(compare_xlsx))
+    log("模型目录: {}".format(models_dir))
+    if args.diff_glb:
+        log("差异模型: 已启用")
+
+    pairs = read_compare_xlsx(compare_xlsx, models_dir)
+    if not pairs:
+        log("ERROR: Sheet3 中未找到有效的对比对（A列+B列）")
+        return 1
+
+    log("共 {} 组对比对".format(len(pairs)))
+
+    results_dir = os.path.join(args.output_dir, "results")
+    os.makedirs(results_dir, exist_ok=True)
+
+    results = []
+    ok_count = 0
+    fail_count = 0
+
+    for code_a, stp_a, code_b, stp_b, row_idx in pairs:
+        pair_dir = os.path.join(results_dir, "{:03d}".format(row_idx))
+        os.makedirs(pair_dir, exist_ok=True)
+
+        result = compare_assemblies(stp_a, stp_b, code_a, code_b,
+                                    pair_dir, log_fn=log, diff_glb=args.diff_glb)
+        if result.get("error"):
+            fail_count += 1
+        else:
+            ok_count += 1
+        results.append(result)
+
+    identical = sum(1 for r in results if r.get("classification") == "一致")
+    minor = sum(1 for r in results if r.get("classification") == "细微差异")
+    significant = sum(1 for r in results if r.get("classification") == "明显不一致")
+
+    summary = {
+        "total_pairs": len(pairs),
+        "ok": ok_count,
+        "failed": fail_count,
+        "identical": identical,
+        "minor_diff": minor,
+        "significant_diff": significant,
+        "pairs": results,
+    }
+
+    summary_path = os.path.join(args.output_dir, "compare_summary.json")
+    import json as _json
+    with open(summary_path, "w", encoding="utf-8") as f:
+        _json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    _write_compare_csv(results, os.path.join(args.output_dir, "compare_summary.csv"), log)
+
+    log("")
+    log("=" * 60)
+    log("对比汇总: 共 {} 对, 一致 {} 对, 细微差异 {} 对, 明显不一致 {} 对, 失败 {} 对".format(
+        len(pairs), identical, minor, significant, fail_count))
+    log("详细报告: {}".format(results_dir))
+    log("汇总CSV:  {}".format(os.path.join(args.output_dir, "compare_summary.csv")))
+    log("=" * 60)
+
+    log("COMPARE_RESULT_JSON: " + _json.dumps(summary, ensure_ascii=False))
+
+    return 0 if fail_count == 0 else 1
+
+
+def _write_compare_csv(results, csv_path, log_fn):
+    try:
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+            import csv
+            w = csv.writer(f)
+            w.writerow([
+                "序号", "代号A", "代号B",
+                "零件数A", "零件数B",
+                "体积A(mm3)", "体积B(mm3)",
+                "体积比", "网格匹配率", "综合相似度",
+                "判定", "质心偏移X", "质心偏移Y", "质心偏移Z",
+                "耗时(s)", "差异模型A", "差异模型B",
+            ])
+            for i, r in enumerate(results):
+                g = r.get("geometric", {})
+                s = r.get("structural", {})
+                offset = g.get("align_offset", [0, 0, 0])
+                w.writerow([
+                    i + 1, r.get("code_a", ""), r.get("code_b", ""),
+                    s.get("part_count_a", ""), s.get("part_count_b", ""),
+                    g.get("volume_a", ""), g.get("volume_b", ""),
+                    g.get("volume_ratio", ""),
+                    g.get("mesh_similarity", ""),
+                    g.get("similarity", ""),
+                    r.get("classification", r.get("error", "?")),
+                    offset[0] if len(offset) > 0 else "",
+                    offset[1] if len(offset) > 1 else "",
+                    offset[2] if len(offset) > 2 else "",
+                    r.get("elapsed_s", ""),
+                    g.get("diff_glb_a", ""), g.get("diff_glb_b", ""),
+                ])
+        log_fn("  CSV: {}".format(csv_path))
+    except Exception as e:
+        log_fn("  WARNING: CSV write failed: {}".format(e))
+
+
+def _run_diag(args):
+    """装配树诊断模式: STP → 层级误判报告"""
+    from pipeline.stp_reader import read_stp_with_doc, verify_doc
+    from pipeline.xcaf_utils import diagnose_assembly_tree
+
+    log("=== 装配树诊断 ===")
+    log("STP: {}".format(args.input))
+
+    t0 = time.time()
+    doc = read_stp_with_doc(args.input)
+    summary = verify_doc(doc, filepath=args.input)
+    log("  读取 (%.1fs), Root shapes: %d" % (
+        time.time() - t0, summary["root_count"]))
+    if not summary["valid"]:
+        log("ERROR: 无有效形状")
+        return 1
+
+    diag = diagnose_assembly_tree(doc)
+
+    # ── Format output ──
+    lines = []
+    sep = "-" * 60
+
+    lines.append("[DIAG] 总节点: %d" % diag["total_nodes"])
+    lines.append("[DIAG] Assembly节点: %d  |  Compound节点: %d  |  误判Compound: %d" % (
+        diag["assembly_nodes"], diag["compound_nodes"],
+        diag["misclassified_compounds"]))
+    lines.append("[DIAG] 深度分布: %s" % ", ".join(
+        "d%s=%d" % (k, diag["depth_distribution"][k])
+        for k in sorted(diag["depth_distribution"].keys(),
+                         key=lambda x: int(x))))
+    lines.append("[DIAG] 形状类型: %s" % ", ".join(
+        "%s=%d" % (k, diag["shape_type_distribution"][k])
+        for k in sorted(diag["shape_type_distribution"].keys())))
+
+    mc_list = diag["misclassified_details"]
+    if mc_list:
+        lines.append(sep)
+        lines.append("[DIAG] 误判Compound节点 (会被_S001分裂, 共%d个):" % len(mc_list))
+        for m in mc_list[:50]:
+            lines.append("[DIAG]   %s d=%d solids=%d | %s  %s" % (
+                m["entry"], m["depth"], m["solid_count"],
+                m["name"], m["path"]))
+        if len(mc_list) > 50:
+            lines.append("[DIAG]   ... 另有 %d 个" % (len(mc_list) - 50))
+    else:
+        lines.append("[DIAG] 无误判Compound节点 - 层级不会丢失")
+
+    lines.append(sep)
+
+    diag_report = "\n".join(lines)
+
+    # Print to stdout (captured by Electron pipeline-progress)
+    log(diag_report)
+
+    # Write to file
+    output_path = os.path.join(args.output_dir, "diag_report.txt")
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(diag_report)
+    log("  report: %s (%.1f KB)" % (output_path, os.path.getsize(output_path) / 1024))
+
+    return 0
 
 
 def _merge_parts_to_compound(parts_list):

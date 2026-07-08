@@ -100,6 +100,10 @@ function buildMenu() {
           click: () => runCleanPipeline(),
         },
         {
+          label: '数模对比 (对比表格)',
+          click: () => runComparePipeline(),
+        },
+        {
           label: '加载已处理的 JSON 文件',
           click: () => safeSend('menu-load-assembly'),
         },
@@ -160,6 +164,12 @@ function buildMenu() {
           label: '仰视',
           click: () => safeSend('menu-view-bottom'),
         },
+        { type: 'separator' },
+        {
+          label: '位置图截取视角',
+          accelerator: 'CmdOrCtrl+P',
+          click: () => safeSend('menu-view-position-capture'),
+        },
       ],
     },
     {
@@ -189,6 +199,22 @@ function buildMenu() {
 
   const menu = Menu.buildFromTemplate(template);
   Menu.setApplicationMenu(menu);
+}
+
+// ── Help Images Path ──────────────────────────────────────
+function getHelpImagesPath() {
+  const fs = require('fs');
+  const path = require('path');
+
+  const packagedPath = path.join(process.resourcesPath, 'help-images');
+  if (fs.existsSync(packagedPath))
+    return packagedPath;
+
+  const devPath = path.join(__dirname, 'help-images');
+  if (fs.existsSync(devPath))
+    return devPath;
+
+  return null;
 }
 
 // ── IPC Handlers ──────────────────────────────────────────
@@ -265,6 +291,126 @@ ipcMain.handle('file-exists', async (_event, filePath) => {
   return fs.existsSync(abs);
 });
 
+ipcMain.handle('get-help-images-path', async () => {
+  return getHelpImagesPath();
+});
+
+ipcMain.handle('list-help-images', async (_event, folder) => {
+  const dir = getHelpImagesPath();
+  if (!dir) return [];
+  const folderPath = path.join(dir, folder);
+  if (!fs.existsSync(folderPath)) return [];
+  const files = fs.readdirSync(folderPath)
+    .filter(f => /\.(png|jpg|jpeg)$/i.test(f))
+    .sort((a, b) => {
+      const na = parseInt(path.basename(a, path.extname(a)));
+      const nb = parseInt(path.basename(b, path.extname(b)));
+      return na - nb;
+    });
+  return files;
+});
+
+ipcMain.handle('read-help-image', async (_event, folder, filename) => {
+  const dir = getHelpImagesPath();
+  if (!dir) return null;
+  const filePath = path.join(dir, folder, filename);
+  if (!fs.existsSync(filePath)) return null;
+  const buffer = fs.readFileSync(filePath);
+  const ext = path.extname(filename).toLowerCase();
+  const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+  return 'data:' + mime + ';base64,' + buffer.toString('base64');
+});
+
+// ── Batch Position Capture ──────────────────────────────
+
+ipcMain.handle('select-batch-position-files', async () => {
+  const bodyResult = await dialog.showOpenDialog(mainWindow, {
+    title: '选择车壳 STP 文件',
+    filters: [{ name: 'STEP 模型', extensions: ['stp', 'step'] }],
+    properties: ['openFile'],
+  });
+  if (bodyResult.canceled || !bodyResult.filePaths[0]) return null;
+
+  const outResult = await dialog.showOpenDialog(mainWindow, {
+    title: '选择输出目录',
+    properties: ['openDirectory'],
+  });
+  if (outResult.canceled || !outResult.filePaths[0]) return null;
+
+  const xlsxResult = await dialog.showOpenDialog(mainWindow, {
+    title: '选择 BOM Excel 文件（可多选）',
+    filters: [{ name: 'Excel 文件', extensions: ['xlsx'] }],
+    properties: ['openFile', 'multiSelections'],
+  });
+  if (xlsxResult.canceled || !xlsxResult.filePaths[0]) return null;
+
+  return {
+    bodyStpPath: bodyResult.filePaths[0],
+    outputDir: outResult.filePaths[0],
+    excelFiles: xlsxResult.filePaths.map(p => ({
+      path: p,
+      dir: path.dirname(p),
+    })),
+  };
+});
+
+ipcMain.handle('run-bom-preview-cached', async (_event, bomPath, modelsDir) => {
+  if (!bomPath || !fs.existsSync(bomPath)) {
+    safeSend('batch-pipeline-progress', 'ERROR: BOM file not found: ' + bomPath);
+    return null;
+  }
+
+  const modelsDirResolved = modelsDir || path.dirname(bomPath);
+  const outputDir = _tsOutputDir(bomPath.replace(/\\/g, '/').replace(/\.xlsx$/i, ''));
+  registerAllowedRoot(outputDir);
+  registerAllowedRoot(modelsDirResolved);
+  const { exePath, baseArgs } = findPipelineExe();
+
+  const args = [
+    ...baseArgs,
+    bomPath,
+    '--bom', bomPath,
+    '--models-dir', modelsDirResolved,
+    '--output-dir', outputDir,
+    '--preview',
+  ];
+
+  safeSend('batch-pipeline-progress', '=== BOM 管线启动: ' + path.basename(bomPath) + ' ===');
+
+  return new Promise((resolve) => {
+    const env = buildPipelineEnv();
+    const proc = spawnPipeline(exePath, args, env);
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        const jsonPath = path.join(outputDir, 'assembly.json');
+        safeSend('batch-pipeline-progress', '管线完成: ' + path.basename(bomPath));
+        resolve(jsonPath);
+      } else {
+        safeSend('batch-pipeline-progress', '管线失败 (code ' + code + '): ' + path.basename(bomPath));
+        resolve(null);
+      }
+    });
+  });
+});
+
+ipcMain.handle('save-batch-file', async (_event, filePath, opts) => {
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  } catch {}
+  const buffer = Buffer.from(opts.data, opts.encoding || 'base64');
+  fs.writeFileSync(filePath, buffer);
+  return filePath;
+});
+
+ipcMain.handle('save-batch-svg', async (_event, filePath, svgString) => {
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  } catch {}
+  fs.writeFileSync(filePath, svgString, 'utf-8');
+  return filePath;
+});
+
 // ── Body shell management ─────────────────────────────────
 
 ipcMain.handle('list-user-bodies', async () => {
@@ -302,6 +448,38 @@ ipcMain.handle('import-body', async () => {
   ];
 
   safeSend('pipeline-progress', '=== 导入车壳 ===');
+
+  return new Promise((resolve) => {
+    const env = buildPipelineEnv();
+    const proc = spawnPipeline(exePath, args, env);
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        const bodyName = path.basename(stpPath, path.extname(stpPath));
+        resolve({ name: bodyName, ok: true });
+      } else {
+        resolve({ name: '', ok: false });
+      }
+    });
+  });
+});
+
+ipcMain.handle('import-body-from-path', async (_event, stpPath) => {
+  if (typeof stpPath !== 'string' || !fs.existsSync(stpPath)) return { name: '', ok: false };
+  const { exePath, baseArgs } = findPipelineExe();
+
+  if (!fs.existsSync(getUserBodiesDir())) {
+    fs.mkdirSync(getUserBodiesDir(), { recursive: true });
+  }
+
+  const args = [
+    ...baseArgs,
+    stpPath,
+    '--export-body',
+    '--output-dir', getUserBodiesDir(),
+  ];
+
+  safeSend('pipeline-progress', '=== 导入车壳 (批量) ===');
 
   return new Promise((resolve) => {
     const env = buildPipelineEnv();
@@ -588,6 +766,10 @@ ipcMain.handle('run-clean-pipeline', async () => {
   await runCleanPipeline();
 });
 
+ipcMain.handle('run-compare-pipeline', async () => {
+  await runComparePipeline();
+});
+
 // ── Pipeline: Preview STP (mesh + load, no analysis) ────
 
 async function runPreviewPipeline() {
@@ -675,6 +857,7 @@ function buildPipelineEnv() {
   // Force UTF-8 + unbuffered I/O so pipeline progress lines arrive promptly and intact
   env.PYTHONIOENCODING = 'utf-8';
   env.PYTHONUNBUFFERED = '1';
+  env.PYTHONLEGACYWINDOWSSTDIO = 'utf-8';
   return env;
 }
 
@@ -1034,6 +1217,50 @@ async function runCleanPipeline() {
       safeSend('pipeline-complete', jsonPath);
     } else {
       safeSend('pipeline-progress', '数模清洗失败，退出码: ' + code);
+      safeSend('pipeline-error', code);
+    }
+  });
+}
+
+async function runComparePipeline() {
+  const xlsxResult = await dialog.showOpenDialog(mainWindow, {
+    title: '选择对比表格 (.xlsx, Sheet3=A列/B列)',
+    filters: [{ name: 'Excel 表格', extensions: ['xlsx'] }],
+    properties: ['openFile'],
+  });
+  if (xlsxResult.canceled || !xlsxResult.filePaths[0]) return;
+
+  const xlsxPath = xlsxResult.filePaths[0];
+  const modelsDir = path.dirname(xlsxPath);
+
+  const outputDir = _tsOutputDir(xlsxPath.replace(/\\/g, '/').replace(/\.xlsx$/i, ''), 'compare');
+  registerAllowedRoot(outputDir);
+  registerAllowedRoot(modelsDir);
+  const { exePath, baseArgs } = findPipelineExe();
+
+  const args = [
+    ...baseArgs,
+    xlsxPath,
+    '--compare', xlsxPath,
+    '--models-dir', modelsDir,
+    '--output-dir', outputDir,
+  ];
+
+  safeSend('pipeline-progress', '=== 数模对比 ===');
+  safeSend('pipeline-progress', '对比表格: ' + xlsxPath);
+  safeSend('pipeline-progress', '模型目录: ' + modelsDir);
+  safeSend('pipeline-mode', 'compare');
+  safeSend('pipeline-started', xlsxPath);
+
+  const env = buildPipelineEnv();
+  const proc = spawnPipeline(exePath, args, env);
+
+  proc.on('close', (code) => {
+    if (code === 0) {
+      safeSend('pipeline-progress', '数模对比完成');
+      safeSend('pipeline-complete', outputDir);
+    } else {
+      safeSend('pipeline-progress', '数模对比失败，退出码: ' + code);
       safeSend('pipeline-error', code);
     }
   });
