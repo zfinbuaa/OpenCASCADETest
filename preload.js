@@ -169,6 +169,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Read a help image file as base64 data URL */
   readHelpImage: (folder, filename) => ipcRenderer.invoke('read-help-image', folder, filename),
 
+  /** Run PMI match on loaded STP file (invoke, returns { labels } or null). */
+  runPmiMatch: (stpPath) => ipcRenderer.invoke('run-pmi-match', stpPath),
+
   // ── Cleanup ───────────────────────────────────────────
 
   removeAllListeners: (channel) => {

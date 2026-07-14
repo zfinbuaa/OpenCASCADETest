@@ -19,7 +19,7 @@ export class ExplosionView {
     this.explodedPositions = new Map();
     this.originalPositions = new Map();
     this.originalLocalPositions = new Map();
-    this.explosionDistance = 150;
+    this.explosionDistance = 30;
     this.isExploded = false;
     this._statusCallback = null;
     this._fixedPartIds = new Set();
@@ -136,12 +136,37 @@ export class ExplosionView {
   _applyWorldOffset(mesh, worldOffset) {
     if (mesh.parent) {
       mesh.parent.updateMatrixWorld(true);
-      const parentInv = new THREE.Matrix4().copy(mesh.parent.matrixWorld).invert();
-      const localOffset = worldOffset.clone().transformDirection(parentInv);
-      mesh.position.add(localOffset);
+      const target = new THREE.Vector3();
+      mesh.getWorldPosition(target);
+      target.add(worldOffset);
+      const localTarget = mesh.parent.worldToLocal(target.clone());
+      mesh.position.copy(localTarget);
     } else {
       mesh.position.add(worldOffset);
     }
+  }
+
+  // ── Percentage ↔ world-distance helpers ─────────
+
+  _computeSceneExtent() {
+    let cx = 0, cy = 0, cz = 0, n = 0;
+    for (const [, pos] of this.originalPositions) {
+      cx += pos.x; cy += pos.y; cz += pos.z; n++;
+    }
+    if (n === 0) return 150;
+    cx /= n; cy /= n; cz /= n;
+    let maxD2 = 0;
+    for (const [, pos] of this.originalPositions) {
+      const dx = pos.x - cx, dy = pos.y - cy, dz = pos.z - cz;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > maxD2) maxD2 = d2;
+    }
+    return Math.sqrt(maxD2);
+  }
+
+  _pctToWorldDistance(pct) {
+    const extent = this._computeSceneExtent();
+    return (pct / 100) * extent * 0.6;
   }
 
   // ── Material State Snapshot ────────────────────
@@ -294,12 +319,13 @@ export class ExplosionView {
     const allDists = [];
     for (const [, u] of units) { allDists.push(u.dist); }
     const maxDist = Math.max(...allDists, 1);
+    const worldDistance = (distance / 100) * Math.max(maxDist, 1) * 0.6;
     for (const [, u] of units) {
       const rawDir = u.ctr.clone().sub(centerPoint);
       const d = rawDir.length();
       const dir = d < 0.01 ? new THREE.Vector3(0, 1, 0) : rawDir.normalize();
       const distFactor = 1.0 + (u.dist / maxDist) * 0.5;
-      const offset = dir.multiplyScalar(distance * distFactor);
+      const offset = dir.multiplyScalar(worldDistance * distFactor);
       for (const mesh of u.meshes) {
         const origin = this.originalPositions.get(mesh).clone();
         this._applyWorldOffset(mesh, offset);
@@ -312,6 +338,7 @@ export class ExplosionView {
 
   async explodeGroupsAnimated(duration = 600) {
     if (this.assemblyGroups.length === 0) return;
+    const worldBase = this._pctToWorldDistance(this.explosionDistance);
     this.resetPositions();
     const stageMap = new Map();
     for (const g of this.assemblyGroups) {
@@ -326,7 +353,7 @@ export class ExplosionView {
       const targets = new Map();
       for (const group of groups) {
         const dir = this._directionToVector(group.direction);
-        const dist = this.explosionDistance * (group.distanceMultiplier || 1);
+        const dist = worldBase * (group.distanceMultiplier || 1);
         for (const mesh of group.meshes) {
           if (this._isFixedMesh(mesh)) continue;
           if (this._isExplosionCenter(mesh)) continue;
@@ -348,9 +375,10 @@ export class ExplosionView {
   }
 
   explodeGroupsInstant() {
+    const worldBase = this._pctToWorldDistance(this.explosionDistance);
     for (const g of this.assemblyGroups) {
       const dir = this._directionToVector(g.direction);
-      const dist = this.explosionDistance * (g.distanceMultiplier || 1);
+      const dist = worldBase * (g.distanceMultiplier || 1);
       const worldOffset = dir.clone().multiplyScalar(dist);
       for (const mesh of g.meshes) {
         if (this._isFixedMesh(mesh)) continue;
@@ -455,6 +483,7 @@ export class ExplosionView {
     }
     unitList.sort((a, b) => b.dist - a.dist);
     const maxDist = Math.max(...unitList.map(u => u.dist), 1);
+    const worldDistance = (distance / 100) * Math.max(maxDist, 1) * 0.6;
     const stageCount = Math.min(5, unitList.length);
     const perStage = Math.ceil(unitList.length / stageCount);
     for (let si = 0; si < stageCount; si++) {
@@ -467,7 +496,7 @@ export class ExplosionView {
         const d = rawDir.length();
         const dir = d < 0.01 ? new THREE.Vector3(0, 1, 0) : rawDir.normalize();
         const distFactor = 1.0 + (u.dist / maxDist) * 0.5;
-        const offset = dir.multiplyScalar(distance * distFactor);
+        const offset = dir.multiplyScalar(worldDistance * distFactor);
         for (const mesh of u.meshes) {
           const origin = this.originalPositions.get(mesh).clone();
           targets.set(mesh, origin.clone().add(offset));
@@ -784,6 +813,7 @@ export class ExplosionView {
 
     this._disassembling = true;
     this._disassembleStage = 0;
+    const worldBase = this._pctToWorldDistance(this.explosionDistance);
 
     this.resetPositions();
     this._clearPathLines();
@@ -805,7 +835,7 @@ export class ExplosionView {
         const groups = stageMap.get(stage);
         for (const group of groups) {
           const dir = this._directionToVector(group.direction);
-          const dist = this.explosionDistance * (group.distanceMultiplier || 1);
+          const dist = worldBase * (group.distanceMultiplier || 1);
           const meshesToRemove = group.meshes.filter(m =>
             !this._isFixedMesh(m) && !this._isExplosionCenter(m));
           if (meshesToRemove.length === 0) continue;
@@ -836,6 +866,8 @@ export class ExplosionView {
 
     if (this._disassembling) return;
 
+    const worldBase = this._pctToWorldDistance(this.explosionDistance);
+
     const stageMap = new Map();
     for (const g of this.assemblyGroups) {
       const s = g.stage || 1;
@@ -855,7 +887,7 @@ export class ExplosionView {
         if (meshesToRemove.length === 0) continue;
         if (!this._removedMeshes.has(meshesToRemove[0])) {
           const dir = this._directionToVector(group.direction);
-          const dist = this.explosionDistance * (group.distanceMultiplier || 1);
+          const dist = worldBase * (group.distanceMultiplier || 1);
 
           this._disassembling = true;
           this._disassembleStage = stage;

@@ -67,12 +67,16 @@ export class AssemblyLoader {
           }
         }
 
+        const firstDistanceMultiplier = firstPart
+          ? firstPart.distanceMultiplier || 1.0
+          : 1.0;
+
         groups.push({
           id: group.id,
           name: group.name,
           meshes: meshes,
           direction: firstDirection,
-          distanceMultiplier: 1.0,
+          distanceMultiplier: firstDistanceMultiplier,
           stage: group.stage,
         });
       }

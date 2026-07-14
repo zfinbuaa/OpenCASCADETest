@@ -4,7 +4,7 @@
  */
 
 import * as THREE from '../node_modules/three/build/three.module.js';
-import { OrbitControls } from './three-addons/controls/OrbitControls.js';
+import { TrackballControls } from './three-addons/controls/TrackballControls.js';
 
 export class SceneManager {
 
@@ -39,9 +39,9 @@ export class SceneManager {
     this.camera.position.set(2000, 1500, 2500);
     this.camera.lookAt(0, 500, 0);
 
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.08;
+    this.controls = new TrackballControls(this.camera, this.renderer.domElement);
+    this.controls.staticMoving = false;
+    this.controls.dynamicDampingFactor = 0.08;
     this.controls.target.set(0, 500, 0);
     this.controls.update();
 
@@ -81,6 +81,7 @@ export class SceneManager {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    this.controls.handleResize();
   }
 
   _animate() {

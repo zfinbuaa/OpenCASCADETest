@@ -97,6 +97,8 @@ def main():
                         help="清洗模式下同时导出清洗后的 STEP 文件")
     parser.add_argument("--diag", action="store_true",
                         help="装配树诊断模式：输出层级误判报告 (STP only)")
+    parser.add_argument("--pmi", action="store_true",
+                        help="PMI诊断模式：输出PMI标注内容及关联零件 (STP only)")
     parser.add_argument("--compare", default=None,
                         help="数模对比模式：Excel(.xlsx)路径，Sheet3的A/B列为待对比模型代号")
     parser.add_argument("--diff-glb", action="store_true",
@@ -108,6 +110,10 @@ def main():
     # ── Compare mode: model comparison ──
     if args.compare:
         return _run_compare(args)
+
+    # ── PMI mode: annotation diagnosis ──
+    if args.pmi:
+        return _run_pmi(args)
 
     # ── Diag mode: assembly tree diagnosis ──
     if args.diag:
@@ -406,7 +412,6 @@ def _run_preview(args):
                                      linear_deflection=args.mesh_deflection)
     log("  {} glb files ({:.1f}s)".format(len(parts), time.time() - t0))
 
-    # Write minimal assembly.json (no stage/contact data)
     assembly = build_assembly_json(parts, [], args.input, roots=roots)
     json_path = os.path.join(args.output_dir, "assembly.json")
     write_assembly_json(assembly, json_path)
@@ -1180,6 +1185,54 @@ def _run_diag(args):
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(diag_report)
     log("  report: %s (%.1f KB)" % (output_path, os.path.getsize(output_path) / 1024))
+
+    return 0
+
+
+def _run_pmi(args):
+    """PMI诊断模式: STP → PMI标注内容 + 关联零件"""
+    from pipeline.stp_reader import read_stp_with_doc, verify_doc
+    from pipeline.pmi_diag import extract_pmi, extract_pmi_full, format_pmi_report
+
+    log("=== PMI 标注诊断 ===")
+    log("STP: {}".format(args.input))
+
+    t0 = time.time()
+    doc = read_stp_with_doc(args.input)
+    summary = verify_doc(doc, filepath=args.input)
+    log("  读取 (%.1fs), Root shapes: %d" % (
+        time.time() - t0, summary["root_count"]))
+    if not summary["valid"]:
+        log("ERROR: 无有效形状")
+        return 1
+
+    pmi_data = extract_pmi_full(doc, stp_path=args.input, log_fn=log)
+
+    from pipeline.pmi_diag import parse_pmi_text_from_step
+    pmi_text = parse_pmi_text_from_step(args.input)
+    log("  [DIAG] STP路径: %s" % args.input)
+    log("  [DIAG] 文本扫描: %d 个标签 %s" % (len(pmi_text), list(pmi_text.keys())))
+    log("  [DIAG] OCCT Datum=%d DimTol=%d | match_results exists=%s" % (
+        pmi_data["summary"]["total_datums"],
+        pmi_data["summary"]["total_dimtols"],
+        "match_results" in pmi_data))
+
+    report = format_pmi_report(pmi_data)
+    log(report)
+
+    output_path = os.path.join(args.output_dir, "pmi_report.txt")
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(report)
+    log("  report: %s (%.1f KB)" % (output_path, os.path.getsize(output_path) / 1024))
+
+    match_results = pmi_data.get("match_results")
+    if match_results:
+        import json
+        labels_json = os.path.join(args.output_dir, "pmi_labels.json")
+        with open(labels_json, "w", encoding="utf-8") as f:
+            json.dump({"labels": match_results}, f, ensure_ascii=False, indent=2)
+        log("  pmi_labels.json: %d 个端子匹配" % len(match_results))
+        log("PMI_MATCH_JSON: %s" % labels_json.replace("\\", "/"))
 
     return 0
 

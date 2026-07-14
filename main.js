@@ -770,6 +770,10 @@ ipcMain.handle('run-compare-pipeline', async () => {
   await runComparePipeline();
 });
 
+ipcMain.handle('run-pmi-match', async (_event, stpPath) => {
+  return await runPmiMatch(stpPath);
+});
+
 // ── Pipeline: Preview STP (mesh + load, no analysis) ────
 
 async function runPreviewPipeline() {
@@ -1219,6 +1223,51 @@ async function runCleanPipeline() {
       safeSend('pipeline-progress', '数模清洗失败，退出码: ' + code);
       safeSend('pipeline-error', code);
     }
+  });
+}
+
+async function runPmiMatch(stpPath) {
+  if (!stpPath || !fs.existsSync(stpPath)) {
+    safeSend('pipeline-progress', 'ERROR: STP file not found: ' + stpPath);
+    return null;
+  }
+  registerAllowedRoot(path.dirname(stpPath));
+  const outputDir = _tsOutputDir(stpPath, 'pmi');
+  registerAllowedRoot(outputDir);
+  const { exePath, baseArgs } = findPipelineExe();
+
+  const args = [
+    ...baseArgs,
+    stpPath,
+    '--output-dir', outputDir,
+    '--pmi',
+  ];
+
+  safeSend('pipeline-progress', '=== PMI 匹配 ===');
+  safeSend('pipeline-mode', 'pmi-match');
+  safeSend('pipeline-started', stpPath);
+
+  const env = buildPipelineEnv();
+  const proc = spawnPipeline(exePath, args, env);
+
+  return new Promise((resolve) => {
+    proc.on('close', (code) => {
+      if (code === 0) {
+        const jsonPath = path.join(outputDir, 'pmi_labels.json');
+        if (fs.existsSync(jsonPath)) {
+          try {
+            const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+            resolve(data);
+          } catch (e) {
+            resolve(null);
+          }
+        } else {
+          resolve(null);
+        }
+      } else {
+        resolve(null);
+      }
+    });
   });
 }
 

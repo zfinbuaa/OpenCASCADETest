@@ -119,6 +119,8 @@ def build_assembly_json(parts, stages, source_file, contacts=None,
             "name": entry["name"],
             "members": [entry["id"]],
             "stage": entry["disassemblyStage"],
+            "direction": entry.get("direction", [0.0, 1.0, 0.0]),
+            "distanceMultiplier": entry.get("distanceMultiplier", 1.0),
         })
 
     stage_descriptions = []

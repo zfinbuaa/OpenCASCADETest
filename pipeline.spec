@@ -48,6 +48,7 @@ a = Analysis(
         'pipeline.compound_utils',
         'pipeline.model_cleaner',
         'pipeline.model_comparator',
+        'pipeline.pmi_diag',
         'numpy',
         'openpyxl',
         'trimesh',

@@ -56,6 +56,23 @@ export class Annotation {
     }];
   }
 
+  setPmiLabels(labels) {
+    if (!labels || labels.length === 0) { this.annotations = []; return; }
+    this.annotations = labels.map((item, i) => ({
+      partId: item.partId,
+      partName: item.label,
+      worldPos: item.targetWorldPos instanceof THREE.Vector3
+        ? item.targetWorldPos
+        : new THREE.Vector3(
+            (item.targetWorldPos && item.targetWorldPos[0]) || 0,
+            (item.targetWorldPos && item.targetWorldPos[1]) || 0,
+            (item.targetWorldPos && item.targetWorldPos[2]) || 0),
+      index: i,
+      labelText: item.label,
+      partIds: new Set([item.partId]),
+    }));
+  }
+
   updatePositions() {
     if (!this.annotations) return;
     for (const ann of this.annotations) {
@@ -113,6 +130,7 @@ export class Annotation {
         targetX: sx, targetY: sy,
         number: ann.index + 1,
         partId: ann.partId, partName: ann.partName,
+        labelText: ann.labelText,
       });
     }
     let prevRightSY = -999;
@@ -126,6 +144,7 @@ export class Annotation {
         targetX: sx, targetY: sy,
         number: ann.index + 1,
         partId: ann.partId, partName: ann.partName,
+        labelText: ann.labelText,
       });
     }
     return result;
@@ -174,63 +193,98 @@ export class Annotation {
     const botPad = 40;
     const availH = h - topPad - botPad;
 
-    function drawOne(ctx, circleX, targetX, targetY, cy, number) {
+    function drawOne(ctx, circleX, targetX, targetY, cy, number, labelText) {
       const dir = targetX > circleX ? 1 : -1;
-      const horStartX = circleX + dir * (CIRCLE_R + 1);
 
-      ctx.beginPath();
-      ctx.strokeStyle = LINE_COLOR;
-      ctx.lineWidth = 1.5;
+      if (labelText) {
+        // PMI text label: capsule shape with adaptive width
+        ctx.font = 'bold 10px -apple-system, "Microsoft YaHei", sans-serif';
+        const textW = ctx.measureText(labelText).width;
+        const capH = 24;
+        const capR = capH / 2;
+        const padX = 8;
+        const capW = Math.max(capH, textW + padX * 2);
+        const capLeft = circleX - capW / 2;
+        const capRight = circleX + capW / 2;
 
-      const horEndX = targetX - dir * 6;
-      ctx.moveTo(horStartX, cy);
-      ctx.lineTo(horEndX, cy);
+        const horStartX = dir > 0 ? capRight + 1 : capLeft - 1;
+        const horEndX = targetX - dir * 6;
 
-      if (Math.abs(targetY - cy) > 2) {
-        ctx.lineTo(horEndX, targetY);
+        ctx.beginPath();
+        ctx.strokeStyle = LINE_COLOR;
+        ctx.lineWidth = 1.5;
+        ctx.moveTo(horStartX, cy);
+        ctx.lineTo(horEndX, cy);
+        if (Math.abs(targetY - cy) > 2) {
+          ctx.lineTo(horEndX, targetY);
+        }
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(capLeft + capR, cy - capR);
+        ctx.lineTo(capRight - capR, cy - capR);
+        ctx.arc(capRight - capR, cy, capR, -Math.PI / 2, Math.PI / 2);
+        ctx.lineTo(capLeft + capR, cy + capR);
+        ctx.arc(capLeft + capR, cy, capR, Math.PI / 2, -Math.PI / 2);
+        ctx.closePath();
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.fillStyle = '#000000';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(labelText, circleX, cy);
+
+      } else {
+        // Number label: circle (unchanged)
+        const horStartX = circleX + dir * (CIRCLE_R + 1);
+        const horEndX = targetX - dir * 6;
+
+        ctx.beginPath();
+        ctx.strokeStyle = LINE_COLOR;
+        ctx.lineWidth = 1.5;
+        ctx.moveTo(horStartX, cy);
+        ctx.lineTo(horEndX, cy);
+        if (Math.abs(targetY - cy) > 2) {
+          ctx.lineTo(horEndX, targetY);
+        }
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(circleX, cy, CIRCLE_R + 2, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.fillStyle = '#000000';
+        ctx.font = 'bold 12px -apple-system, "Microsoft YaHei", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(number), circleX, cy);
       }
-
-      ctx.stroke();
-
-      // White circle
-      ctx.beginPath();
-      ctx.arc(circleX, cy, CIRCLE_R + 2, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffffff';
-      ctx.fill();
-      ctx.strokeStyle = '#000000';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      // Number
-      ctx.fillStyle = '#000000';
-      ctx.font = 'bold 12px -apple-system, "Microsoft YaHei", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(String(number), circleX, cy);
     }
 
     let prevLeftSY = -999;
     for (let i = 0; i < leftCount; i++) {
       const { sx, sy, ann } = screenPoints[i];
       let cy = topPad + (availH / (leftCount + 1)) * (i + 1);
-      if (i > 0 && Math.abs(sy - prevLeftSY) < 40) {
-        cy += 25;
-      }
+      if (i > 0 && Math.abs(sy - prevLeftSY) < 40) { cy += 25; }
       prevLeftSY = sy;
-      const number = ann.index + 1;
-      drawOne(ctx, leftX, sx, sy, cy, number);
+      drawOne(ctx, leftX, sx, sy, cy, ann.index + 1, ann.labelText);
     }
 
     let prevRightSY = -999;
     for (let i = 0; i < rightCount; i++) {
       const { sx, sy, ann } = screenPoints[leftCount + i];
       let cy = topPad + (availH / (rightCount + 1)) * (i + 1);
-      if (i > 0 && Math.abs(sy - prevRightSY) < 40) {
-        cy += 25;
-      }
+      if (i > 0 && Math.abs(sy - prevRightSY) < 40) { cy += 25; }
       prevRightSY = sy;
-      const number = ann.index + 1;
-      drawOne(ctx, rightX, sx, sy, cy, number);
+      drawOne(ctx, rightX, sx, sy, cy, ann.index + 1, ann.labelText);
     }
   }
 

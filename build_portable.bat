@@ -153,11 +153,22 @@ if errorlevel 1 (
     echo [INFO] ZIP archive: release\!ZIPNAME!.zip
 )
 
+REM --- Verify help-images folder in resources ---
+set "HELPIMG=%UNPACKED%\resources\help-images"
+if not exist "%HELPIMG%" (
+    echo.
+    echo [WARN] help-images folder not in resources.
+    echo   This folder is NOT needed for the app to run.
+    echo   Place help screenshots here before packaging:
+    echo     %HELPIMG%
+) else (
+    echo [INFO] help-images folder verified: %HELPIMG%
+)
+
 echo.
 echo ============================================================
 echo   ALL DONE
 echo   Portable folder : %UNPACKED%
-echo   ZIP archive     : release\!ZIPNAME!.zip
 echo ============================================================
 echo.
 echo   To deploy, copy the entire '%UNPACKED%' folder to the

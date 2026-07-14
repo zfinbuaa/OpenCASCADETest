@@ -55,6 +55,8 @@ const shared = {
   explosionCenter: null,
   compounds: [],
   bomCompounds: [],
+  pmiLabels: null,
+  stpPath: null,
 };
 
 // ── Per-tab state ─────────────────────────────────────────
@@ -62,6 +64,7 @@ const tabs = [
   { mode: 'compare', tree: null },
   { mode: 'clean', tree: null },
   { mode: 'position', tree: null },
+  { mode: 'position-circuit', tree: null },
   { mode: 'explosion', tree: null },
   { mode: 'serviceability', tree: null },
   { mode: 'manual', tree: null },
@@ -87,7 +90,7 @@ function switchTab(idx) {
   activeTab = idx;
   tabBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
 
-  const titles = ['数模对比', '数模清洗', '位置图', '爆炸图', '拆装方案（可维修性）', '拆装方案（维修手册）', '帮助'];
+  const titles = ['数模对比', '数模清洗', '位置图（维修）', '位置图（电路）', '爆炸图', '拆装方案（可维修性）', '拆装方案（维修手册）', '帮助'];
   panelHeader.textContent = titles[idx];
 
   renderPanel(idx);
@@ -101,10 +104,11 @@ function renderPanel(idx) {
     case 0: renderComparePanel(); break;
     case 1: renderCleanPanel(); break;
     case 2: renderPositionPanel(); break;
-    case 3: renderExplosionPanel(); break;
-    case 4: renderServiceabilityPanel(); break;
-    case 5: renderManualPanel(); break;
-    case 6: renderHelpPanel(); break;
+    case 3: renderPositionCircuitPanel(); break;
+    case 4: renderExplosionPanel(); break;
+    case 5: renderServiceabilityPanel(); break;
+    case 6: renderManualPanel(); break;
+    case 7: renderHelpPanel(); break;
   }
 }
 
@@ -307,6 +311,38 @@ function renderPositionPanel() {
   bindPositionPanel();
 }
 
+function renderPositionCircuitPanel() {
+  let h = '';
+  h += '<div class="section-title">数据加载</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-pri" id="btn-load-circuit">加载PMI标注</button>';
+  h += '</div>';
+  h += '<div class="section-title">车壳选择</div>';
+  h += '<select class="sel" id="sel-body-circuit">';
+  for (const b of bodyLoader.bodies) {
+    h += '<option value="' + b.name + '">' + b.name + '</option>';
+  }
+  h += '</select>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-import-body-circuit">导入新壳</button>';
+  h += '</div>';
+  h += '<div class="section-title">可见性</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-show-all-circuit">全部显示</button>';
+  h += '<button class="btn btn-outline" id="btn-hide-all-circuit">全部隐藏</button>';
+  h += '<button class="btn btn-outline" id="btn-show-selected-circuit">仅显示选中</button>';
+  h += '</div>';
+  h += '<div class="section-title">标注导出</div>';
+  h += '<div class="btn-group">';
+  h += '<button class="btn btn-outline" id="btn-annot-show-circuit">显示标注</button>';
+  h += '<button class="btn btn-outline" id="btn-annot-hide-circuit">清除标注</button>';
+  h += '<button class="btn btn-outline" id="btn-export-circuit">导出 PNG</button>';
+  h += '<button class="btn btn-outline" id="btn-export-svg-circuit">导出 SVG</button>';
+  h += '</div>';
+  panelBody.innerHTML = h;
+  bindPositionCircuitPanel();
+}
+
 function renderExplosionPanel() {
   let h = '';
   h += '<div class="section-title">编组管理</div>';
@@ -322,7 +358,7 @@ function renderExplosionPanel() {
   h += '</div>';
   h += '<div id="center-display" style="margin:4px 12px;font-size:11px;color:#7ec8e3;">未设置 (使用几何重心)</div>';
   h += '<div class="section-title">爆炸控制</div>';
-  h += '<div class="slider-row"><span>距离</span><input type="range" id="slider-dist" min="10" max="2000" value="150" step="5"><span id="val-dist">150</span>mm</div>';
+  h += '<div class="slider-row"><span>强度</span><input type="range" id="slider-dist" min="1" max="100" value="30" step="1"><span id="val-dist">30</span>%</div>';
   h += '<div class="btn-group">';
   h += '<button class="btn btn-pri" id="btn-explode-instant">爆炸</button>';
   h += '<button class="btn btn-outline" id="btn-reset">复位</button></div>';
@@ -861,6 +897,78 @@ function _buildHierarchyLeafMap() {
   return map;
 }
 
+function bindPositionCircuitPanel() {
+  document.getElementById('btn-load-circuit')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    statusBar.textContent = '正在加载 PMI 标注...';
+    try {
+      const stpPath = shared.stpPath || '';
+      if (!stpPath) { statusBar.textContent = '错误: 未加载 STP 文件'; return; }
+      const result = await window.electronAPI.runPmiMatch(stpPath);
+      if (result && result.labels) {
+        shared.pmiLabels = result.labels;
+        statusBar.textContent = 'PMI 标注加载完成: ' + result.labels.length + ' 个端子';
+        _showCircuitAnnotations();
+      } else {
+        statusBar.textContent = '未找到 PMI 标注信息';
+      }
+    } catch (e) {
+      statusBar.textContent = 'PMI 加载失败: ' + (e && e.message);
+    }
+  });
+
+  document.getElementById('sel-body-circuit')?.addEventListener('change', async (e) => {
+    await bodyLoader.switchBody(e.target.selectedIndex, sm.scene);
+  });
+  document.getElementById('btn-import-body-circuit')?.addEventListener('click', async () => {
+    if (!window.electronAPI) { statusBar.textContent = '错误: 需在 Electron 环境中运行'; return; }
+    statusBar.textContent = '导入车壳中...';
+    const result = await window.electronAPI.importBody();
+    if (result && result.ok) {
+      await bodyLoader.reloadBodies();
+      const sel = document.getElementById('sel-body-circuit');
+      if (sel) {
+        sel.innerHTML = '';
+        for (const b of bodyLoader.bodies) {
+          sel.innerHTML += '<option value="' + b.name + '">' + b.name + '</option>';
+        }
+      }
+      statusBar.textContent = '车壳导入成功';
+    } else { statusBar.textContent = '车壳导入失败'; }
+  });
+
+  document.getElementById('btn-show-all-circuit')?.addEventListener('click', () => {
+    shared.hiddenPartIds.clear();
+    _syncVisibility();
+    statusBar.textContent = '全部显示';
+  });
+  document.getElementById('btn-hide-all-circuit')?.addEventListener('click', () => {
+    if (!shared.assembly || !shared.assembly.parts) return;
+    for (const p of shared.assembly.parts) shared.hiddenPartIds.add(p.id);
+    _syncVisibility();
+    statusBar.textContent = '全部隐藏';
+  });
+  document.getElementById('btn-show-selected-circuit')?.addEventListener('click', () => {
+    const tree = tabs[activeTab].tree;
+    if (tree) tree.showOnlySelected();
+  });
+
+  document.getElementById('btn-annot-show-circuit')?.addEventListener('click', () => {
+    if (!shared.pmiLabels || shared.pmiLabels.length === 0) {
+      statusBar.textContent = '请先点击"加载PMI标注"';
+      return;
+    }
+    _showCircuitAnnotations();
+  });
+  document.getElementById('btn-annot-hide-circuit')?.addEventListener('click', () => {
+    annot.clear();
+    _restorePmiPartColors();
+    statusBar.textContent = '标注已清除';
+  });
+  document.getElementById('btn-export-circuit')?.addEventListener('click', _exportAnnotated);
+  document.getElementById('btn-export-svg-circuit')?.addEventListener('click', _exportSVG);
+}
+
 function bindExplosionPanel() {
   document.getElementById('btn-set-center')?.addEventListener('click', () => {
     const sel = shared.selectedNode
@@ -911,7 +1019,7 @@ function bindExplosionPanel() {
   const val = document.getElementById('val-dist');
   slider?.addEventListener('input', () => {
     const v = parseInt(slider.value);
-    val.textContent = v;
+    val.textContent = v + '%';
     sharedExplo.setExplosionDistance(v);
   });
   document.getElementById('btn-explode-instant')?.addEventListener('click', () => {
@@ -932,8 +1040,10 @@ function bindExplosionPanel() {
   document.getElementById('btn-export')?.addEventListener('click', _exportAnnotated);
   document.getElementById('btn-export-svg-explosion')?.addEventListener('click', _exportSVG);
   _bindChainDemoButtons();
-  if (shared.groups && shared.groups.length > 0) {
-    sharedExplo.loadAssemblyGroups(shared.groups);
+  if (shared.hierarchy && shared.hierarchy.length > 0 && shared.meshes.length > 0) {
+    const hierarchyGroups = _buildGroupsFromHierarchy(shared.hierarchy, shared.meshes);
+    shared.groups = hierarchyGroups;
+    sharedExplo.loadAssemblyGroups(hierarchyGroups);
   }
   buildActiveTree();
   _updateCenterDisplay();
@@ -1301,9 +1411,58 @@ function buildActiveTree() {
   _updateCompoundPreview();
 }
 
+function _buildGroupsFromHierarchy(hierarchy, meshes) {
+  const partIdToMesh = new Map();
+  for (const mesh of meshes) {
+    const pid = mesh.userData.partId;
+    if (!partIdToMesh.has(pid)) partIdToMesh.set(pid, []);
+    partIdToMesh.get(pid).push(mesh);
+  }
+
+  const partMap = new Map();
+  if (shared.assembly && shared.assembly.parts) {
+    for (const part of shared.assembly.parts) {
+      partMap.set(part.id, part);
+    }
+  }
+
+  function _collectAllPartIds(node) {
+    const ids = [...(node.partIds || [])];
+    if (node.children) {
+      for (const c of node.children) ids.push(..._collectAllPartIds(c));
+    }
+    return ids;
+  }
+
+  const groups = [];
+  for (const root of hierarchy) {
+    for (const child of (root.children || [])) {
+      const partIds = _collectAllPartIds(child);
+      const groupMeshes = [];
+      for (const pid of partIds) {
+        const ms = partIdToMesh.get(pid);
+        if (ms) groupMeshes.push(...ms);
+      }
+      if (groupMeshes.length === 0) continue;
+      const firstPid = groupMeshes[0].userData.partId;
+      const partData = partMap.get(firstPid) || {};
+      groups.push({
+        id: child.id,
+        name: child.name,
+        meshes: groupMeshes,
+        direction: partData.direction || '+Y',
+        distanceMultiplier: partData.distanceMultiplier || 1.0,
+        stage: partData.disassemblyStage || 1,
+      });
+    }
+  }
+  return groups;
+}
+
 function _rebuildExplosionGroups() {
-  if (!shared.assembly || !shared.loaded) return;
-  const baseGroups = AssemblyLoader._buildGroups(shared.assembly, shared.loaded);
+  if (!shared.hierarchy || shared.hierarchy.length === 0) return;
+  if (shared.meshes.length === 0) return;
+  const baseGroups = _buildGroupsFromHierarchy(shared.hierarchy, shared.meshes);
   if (shared.checkedPartIds.size === 0) {
     shared.groups = baseGroups;
     sharedExplo.loadAssemblyGroups(shared.groups);
@@ -1441,8 +1600,12 @@ async function _loadModelCore(assembly, dir) {
     }
   }
 
-  shared.groups = AssemblyLoader._buildGroups(assembly, shared.loaded);
   shared.hierarchy = assembly.hierarchy || [];
+  if (shared.hierarchy.length > 0 && shared.meshes.length > 0) {
+    shared.groups = _buildGroupsFromHierarchy(shared.hierarchy, shared.meshes);
+  } else {
+    shared.groups = AssemblyLoader._buildGroups(assembly, shared.loaded);
+  }
   sharedExplo.loadAssemblyGroups(shared.groups);
 
   _logPipeline('Loaded ' + shared.loaded.size + ' parts, ' + meshCount + ' meshes');
@@ -1922,8 +2085,12 @@ async function _loadModelCoreSilently(assembly, dir) {
     }
   }
 
-  shared.groups = AssemblyLoader._buildGroups(assembly, shared.loaded);
   shared.hierarchy = assembly.hierarchy || [];
+  if (shared.hierarchy.length > 0 && shared.meshes.length > 0) {
+    shared.groups = _buildGroupsFromHierarchy(shared.hierarchy, shared.meshes);
+  } else {
+    shared.groups = AssemblyLoader._buildGroups(assembly, shared.loaded);
+  }
 }
 
 function _disposeAllModels() {
@@ -1993,6 +2160,7 @@ if (window.electronAPI) {
   window.electronAPI.onPipelineStarted((stpPath) => {
     if (stpPath) {
       shared.sourceStpPath = stpPath;
+      shared.stpPath = stpPath;
       if (pipelineMode === 'bom-preview' || pipelineMode === 'bom-full') {
         shared.bomSourcePath = stpPath;
         shared.bomModelsDir = null;
@@ -2045,6 +2213,70 @@ if (window.electronAPI) {
 }
 
 // ── Startup ──────────────────────────────────────────────
+function _showCircuitAnnotations() {
+  if (!shared.pmiLabels || shared.pmiLabels.length === 0) {
+    statusBar.textContent = '无 PMI 标注数据';
+    return;
+  }
+  const meshes = sm.scene.children.filter(c => c.userData && c.userData.partId);
+  const partMeshMap = new Map();
+  for (const m of meshes) {
+    const pid = m.userData.partId;
+    if (!partMeshMap.has(pid)) partMeshMap.set(pid, []);
+    partMeshMap.get(pid).push(m);
+  }
+
+  const labelData = [];
+  for (const item of shared.pmiLabels) {
+    const partName = item.part || '';
+    const matchingMeshes = partMeshMap.get(partName) || [];
+    const targetPos = new THREE.Vector3(...(item.leader_pos || [0, 0, 0]));
+    if (matchingMeshes.length > 0 && !shared.hiddenPartIds.has(partName)) {
+      const bbox = new THREE.Box3();
+      for (const m of matchingMeshes) {
+        m.geometry.computeBoundingBox();
+        bbox.union(m.geometry.boundingBox.applyMatrix4(m.matrixWorld));
+      }
+      targetPos.copy(bbox.getCenter(new THREE.Vector3()));
+    }
+    labelData.push({
+      label: item.label,
+      partId: partName,
+      targetWorldPos: targetPos,
+    });
+  }
+  annot.setPmiLabels(labelData);
+  annot.show();
+
+  // Orange highlight matched parts
+  _restorePmiPartColors();
+  shared._pmiHighlighted = new Set();
+  for (const item of shared.pmiLabels) {
+    if (item.part) shared._pmiHighlighted.add(item.part);
+  }
+  sm.scene.traverse((child) => {
+    if (child.isMesh && shared._pmiHighlighted.has(child.userData.partId)) {
+      if (!child.userData._origColor) {
+        child.userData._origColor = child.material.color.clone();
+      }
+      child.material.color.setRGB(1.0, 0.5, 0.0);
+    }
+  });
+
+  statusBar.textContent = '电路标注: ' + labelData.length + ' 个端子';
+}
+
+function _restorePmiPartColors() {
+  if (!shared._pmiHighlighted) return;
+  sm.scene.traverse((child) => {
+    if (child.isMesh && child.userData._origColor) {
+      child.material.color.copy(child.userData._origColor);
+      child.userData._origColor = null;
+    }
+  });
+  shared._pmiHighlighted = null;
+}
+
 bodyLoader.loadManifest('bodies/manifest.json', modelLoader)
   .then(() => renderPanel(0))
   .catch((err) => {
